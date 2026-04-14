@@ -1,0 +1,11 @@
+# Idle timeout for each rust-analyzer instance (seconds).
+# Instances will be shut down if no client is attached within this period.
+instance_timeout = 300
+
+# Interval for background garbage collection (seconds).
+# Used to clean up expired or unused instances.
+gc_interval = 10
+
+# Addresses for the daemon to listen on.
+# Format: [host, port]
+listen = ["127.0.0.1", 27631]
