@@ -9,7 +9,6 @@ use tokio::{
     sync::mpsc::channel,
 };
 use tracing::{debug, info, warn};
-use uuid::Uuid;
 
 use crate::instance::{InstanceKey, LspServerInstanceManager};
 
@@ -43,7 +42,7 @@ async fn process(manager: Arc<LspServerInstanceManager>, client_id: u32, stream:
     // TODO: Parse the LSP initialize request and derive a stable workspace key
     // from its workspace-specific fields instead of using a random UUID.
     let workspace = "/home/fys/projects/rad/";
-    let key = InstanceKey::new(workspace.clone());
+    let key = InstanceKey::new(workspace);
     let (client_tx, mut client_rx) = channel(10);
     let (mut read_stream, mut write_stream) = stream.into_split();
 
