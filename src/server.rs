@@ -55,6 +55,10 @@ async fn process(manager: Arc<LspServerInstanceManager>, client_id: u32, stream:
 
     let write_task = tokio::spawn(async move {
         while let Some(msg) = client_rx.recv().await {
+            // TODO: remove it later.
+            info!("recv msg from rust analyzer: {:?}", unsafe {
+                String::from_utf8_unchecked(msg.clone())
+            });
             debug!(
                 client_id,
                 bytes = msg.len(),
