@@ -33,7 +33,7 @@ pub async fn run() {
                 });
             }
             Err(e) => {
-                warn!("failed to accept client connection: {:?}", e);
+                warn!(error = ?e, "failed to accept client connection");
             }
         }
     }
@@ -42,7 +42,7 @@ pub async fn run() {
 async fn process(manager: Arc<LspServerInstanceManager>, client_id: u32, stream: TcpStream) {
     // TODO: Parse the LSP initialize request and derive a stable workspace key
     // from its workspace-specific fields instead of using a random UUID.
-    let workspace = Uuid::new_v4().to_string();
+    let workspace = "/home/fys/projects/rad/";
     let key = InstanceKey::new(workspace.clone());
     let (client_tx, mut client_rx) = channel(10);
     let (mut read_stream, mut write_stream) = stream.into_split();
@@ -83,6 +83,10 @@ async fn process(manager: Arc<LspServerInstanceManager>, client_id: u32, stream:
                 }
                 Ok(n) => {
                     debug!(client_id, bytes = n, "read message from client socket");
+                    // TODO: remove it later.
+                    info!("recv msg from client: {:?}", unsafe {
+                        String::from_utf8_unchecked(buf[..n].to_vec())
+                    });
                     manager_for_read.send_to_instance(&key_for_read, client_id, buf[..n].to_vec());
                 }
                 Err(err) => {

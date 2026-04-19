@@ -31,12 +31,7 @@ impl Default for LspServerInstanceManager {
 }
 
 impl LspServerInstanceManager {
-    pub fn spawn_instance(
-        &self,
-        client_id: u32,
-        client_tx: Sender<Vec<u8>>,
-        key: &InstanceKey,
-    ) {
+    pub fn spawn_instance(&self, client_id: u32, client_tx: Sender<Vec<u8>>, key: &InstanceKey) {
         let instance = match self.instances.entry(key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(entry) => {
                 debug!(
@@ -94,8 +89,7 @@ impl LspServerInstanceManager {
         }) {
             error!(
                 "failed to send message to instance for workspace {}: {}",
-                key.workspace,
-                err
+                key.workspace, err
             );
         }
     }
@@ -195,7 +189,11 @@ impl LspServerInstance {
         let removed = self.clients.remove(&client_id);
 
         if removed.is_none() {
-            warn!(client_id, pid = self.pid, "client handle not found during removal");
+            warn!(
+                client_id,
+                pid = self.pid,
+                "client handle not found during removal"
+            );
         }
 
         removed
