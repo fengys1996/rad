@@ -311,6 +311,7 @@ name = "rad"
 version = "0.1.0"
 dependencies = [
  "dashmap",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
