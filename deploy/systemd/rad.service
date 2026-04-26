@@ -1,0 +1,16 @@
+[Unit]
+Description=rad (rust-analyzer daemon) - user service
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=RUST_LOG=info
+ExecStart=/home/fys/.cargo/bin/rad server
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

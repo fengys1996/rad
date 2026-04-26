@@ -43,6 +43,22 @@ Run server mode (default):
 rad server
 ```
 
+## systemd
+
+Unit file is provided at:
+
+- `deploy/systemd/rad.service` (user service)
+
+Quick setup (user service):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/rad.service ~/.config/systemd/user/rad.service
+systemctl --user daemon-reload
+systemctl --user enable --now rad
+systemctl --user status rad
+```
+
 ## Neovim Usage
 
 Use `rad` as stdio server:
