@@ -8,7 +8,7 @@ pub mod logging;
 pub mod protocol;
 pub mod server;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     init_tracing();
     match parse_mode() {
