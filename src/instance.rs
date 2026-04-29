@@ -1,4 +1,5 @@
 use std::{
+    path::PathBuf,
     process::Stdio,
     sync::atomic::Ordering,
     sync::{
@@ -102,7 +103,7 @@ impl LspServerInstanceManager {
                     );
                     stale.shutdown().await;
                 }
-                let instance = Arc::new(LspServerInstance::new());
+                let instance = Arc::new(LspServerInstance::new(key.workspace_dir()));
                 info!(
                     workspace = %key.workspace,
                     pid = instance.pid,
@@ -112,7 +113,7 @@ impl LspServerInstanceManager {
                 instance
             }
         } else {
-            let instance = Arc::new(LspServerInstance::new());
+            let instance = Arc::new(LspServerInstance::new(key.workspace_dir()));
             info!(
                 workspace = %key.workspace,
                 pid = instance.pid,
@@ -472,13 +473,16 @@ struct RoutedPacket {
 }
 
 impl LspServerInstance {
-    pub fn new() -> LspServerInstance {
-        let mut proc = Command::new("rust-analyzer")
+    pub fn new(workspace_dir: Option<PathBuf>) -> LspServerInstance {
+        let mut command = Command::new("rust-analyzer");
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::inherit());
+        if let Some(dir) = workspace_dir {
+            command.current_dir(dir);
+        }
+        let mut proc = command.spawn().unwrap();
 
         let pid = proc.id().unwrap_or_default();
         let stdin = proc.stdin.take().expect("rust-analyzer stdin is piped");
@@ -636,6 +640,24 @@ impl InstanceKey {
         Self {
             workspace: workspace.into(),
         }
+    }
+
+    fn workspace_dir(&self) -> Option<PathBuf> {
+        if let Some(path) = self.workspace.strip_prefix("file://") {
+            if path.starts_with('/') {
+                return Some(PathBuf::from(path));
+            }
+            if let Some(idx) = path.find('/') {
+                return Some(PathBuf::from(&path[idx..]));
+            }
+            return None;
+        }
+
+        if self.workspace.starts_with('/') {
+            return Some(PathBuf::from(&self.workspace));
+        }
+
+        None
     }
 }
 
@@ -805,7 +827,7 @@ mod tests {
             );
         }
 
-        let instance = LspServerInstance::new();
+        let instance = LspServerInstance::new(None);
 
         instance.shutdown().await;
 
