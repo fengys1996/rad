@@ -83,7 +83,32 @@ vim.g.rustaceanvim = {
 
 ### VSCode
 
-Temporarily not working.
+VSCode's Rust Analyzer extension calls `--version` (`-V`) on the configured
+server binary during startup. Since `rad client` is a proxy command, use a
+wrapper script to forward version queries to the real `rust-analyzer`.
 
-The VSCode Rust Analyzer extension appears to request `rust-analyzer` version
-information from `rad client` during startup, and this path is not supported yet.
+1. Create a wrapper script, for example `~/.local/bin/rad-ra`:
+
+```bash
+#!/bin/bash
+
+if [[ "$1" == "--version" || "$1" == "-V" ]]; then
+    exec rust-analyzer --version
+fi
+
+exec rad client "$@"
+```
+
+2. Make it executable:
+
+```bash
+chmod +x ~/.local/bin/rad-ra
+```
+
+3. Configure VSCode (`settings.json`):
+
+```json
+{
+  "rust-analyzer.server.path": "{path}/rad-ra"
+}
+```
