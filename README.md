@@ -30,6 +30,7 @@ single `rust-analyzer` instance.
 - Rewrite `$/cancelRequest` IDs from client-local ID to global ID.
 - Forward RA messages without request IDs to the most recently active client.
 - Reuse existing instance for the same workspace.
+- Start `rust-analyzer` in the workspace directory to respect each project's Rust toolchain.
 - Short-circuit `initialize` for reused instances using cached initialize result.
 - Keep RA alive when clients disconnect; idle reaper shuts it down after 5 minutes.
 
