@@ -10,9 +10,11 @@ pub mod server;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    init_tracing();
     match parse_mode() {
-        Mode::Server => server::run().await,
+        Mode::Server => {
+            init_tracing();
+            server::run().await
+        }
         Mode::Client { addr } => client::run(&addr).await,
     }
 }
