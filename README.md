@@ -61,6 +61,10 @@ systemctl --user enable --now rad
 systemctl --user status rad
 ```
 
+### 3. launchd (macOS)
+
+For macOS setup, see [deploy/launchd/README.md](deploy/launchd/README.md).
+
 ## Editor Configuration
 
 ### Neovim(rustaceanvim)
