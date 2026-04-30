@@ -35,17 +35,19 @@ It also allows multiple editors opening the same workspace to reuse a single
 
 todo
 
-## Run rad Server
+## How to Use
+
+### Run rad Server
 
 Default address: `127.0.0.1:27631`.
 
-### 1. Direct Run
+#### 1. Direct Run
 
 ```bash
 rad server
 ```
 
-### 2. systemd
+#### 2. systemd
 
 Unit file:
 
@@ -61,13 +63,13 @@ systemctl --user enable --now rad
 systemctl --user status rad
 ```
 
-### 3. launchd (macOS)
+#### 3. launchd (macOS)
 
 For macOS setup, see [deploy/launchd/README.md](deploy/launchd/README.md).
 
-## Editor Configuration
+### Configure Editor
 
-### Neovim(rustaceanvim)
+#### Neovim(rustaceanvim)
 
 An example configuration of rustaceanvim is shown below.
 
@@ -85,7 +87,7 @@ vim.g.rustaceanvim = {
 }
 ```
 
-### VSCode
+#### VSCode
 
 VSCode's Rust Analyzer extension calls `--version` (`-V`) on the configured
 server binary during startup. Since `rad client` is a proxy command, use a
