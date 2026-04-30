@@ -39,37 +39,23 @@ todo
 
 ### Run rad Server
 
-Default address: `127.0.0.1:27631`.
-
-#### 1. Direct Run
+**Direct Run**
 
 ```bash
 rad server
 ```
 
-#### 2. systemd
+**systemd**
 
-Unit file:
+For Linux setup, see [deploy/systemd/README.md](deploy/systemd/README.md).
 
-- `deploy/systemd/rad.service` (user service)
-
-Quick setup:
-
-```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/systemd/rad.service ~/.config/systemd/user/rad.service
-systemctl --user daemon-reload
-systemctl --user enable --now rad
-systemctl --user status rad
-```
-
-#### 3. launchd (macOS)
+**launchd (macOS)**
 
 For macOS setup, see [deploy/launchd/README.md](deploy/launchd/README.md).
 
 ### Configure Editor
 
-#### Neovim(rustaceanvim)
+**Neovim(rustaceanvim)**
 
 An example configuration of rustaceanvim is shown below.
 
@@ -87,7 +73,7 @@ vim.g.rustaceanvim = {
 }
 ```
 
-#### VSCode
+**VSCode**
 
 VSCode's Rust Analyzer extension calls `--version` (`-V`) on the configured
 server binary during startup. Since `rad client` is a proxy command, use a
