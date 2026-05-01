@@ -2,7 +2,7 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:27631";
 
 pub enum Mode {
     Server,
-    Client { addr: String },
+    Client,
 }
 
 pub fn parse_mode() -> Mode {
@@ -10,10 +10,7 @@ pub fn parse_mode() -> Mode {
 
     match args.next().as_deref() {
         None | Some("server") => Mode::Server,
-        Some("client") => {
-            let addr = args.next().unwrap_or_else(|| DEFAULT_ADDR.to_string());
-            Mode::Client { addr }
-        }
+        Some("client") => Mode::Client,
         Some(_) => Mode::Server,
     }
 }
