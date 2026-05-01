@@ -1,4 +1,4 @@
-use crate::logging::init_tracing;
+use crate::logging::{default_client_options, default_server_options, init_logging};
 use config::{Mode, parse_mode};
 
 pub mod client;
@@ -10,11 +10,16 @@ pub mod server;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    match parse_mode() {
+    let _logging_guard = match parse_mode() {
         Mode::Server => {
-            init_tracing();
-            server::run().await
+            let guard = init_logging(default_server_options());
+            server::run().await;
+            guard
         }
-        Mode::Client { addr } => client::run(&addr).await,
-    }
+        Mode::Client { addr } => {
+            let guard = init_logging(default_client_options());
+            client::run(&addr).await;
+            guard
+        }
+    };
 }
