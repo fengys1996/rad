@@ -27,8 +27,8 @@ pub async fn run(opts: Options) -> Result<()> {
 
     let stream = match TcpStream::connect(&server_addr).await {
         Ok(stream) => stream,
-        Err(err) => {
-            bail!("failed to connect to red server, err: {err:?}, server addr: {server_addr}");
+        Err(e) => {
+            bail!("failed to connect to red server, err: {e:?}, server addr: {server_addr}");
         }
     };
 
