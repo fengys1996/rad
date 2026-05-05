@@ -109,10 +109,12 @@ where
                     match decode_result {
                         Ok(Some(packet)) => return Poll::Ready(Some(Ok(RadMessage::Lsp(packet)))),
                         Ok(None) => {}
-                        Err(err) => {
-                            self.lsp_buf.clear();
-                            self.terminated = true;
-                            return Poll::Ready(Some(Err(err)));
+                        Err(_err) => {
+                            todo!()
+                            // FIXME
+                            // self.lsp_buf.clear();
+                            // self.terminated = true;
+                            // return Poll::Ready(Some(Err(err)));
                         }
                     }
                 }

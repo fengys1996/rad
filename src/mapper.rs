@@ -167,7 +167,8 @@ impl ReqIdMapper {
         let Some(obj) = json.as_object_mut() else {
             return RoutedPacket {
                 client_id: active_client_id,
-                bytes: packet.to_bytes(),
+                // FIXME
+                bytes: packet.to_bytes().unwrap(),
             };
         };
 
@@ -186,7 +187,8 @@ impl ReqIdMapper {
                 .remove(&(pending.client_id, pending.raw_req_id.clone()));
             obj.insert("id".to_string(), pending.raw_req_id.to_value());
 
-            let bytes = LspFrame::from_body(json).to_bytes();
+            // FIXME
+            let bytes = LspFrame::new(json).to_bytes().unwrap();
 
             debug!(
                 pid,
@@ -204,7 +206,8 @@ impl ReqIdMapper {
 
         RoutedPacket {
             client_id: active_client_id,
-            bytes: packet.to_bytes(),
+            // FIXME
+            bytes: packet.to_bytes().unwrap(),
         }
     }
 
@@ -217,7 +220,8 @@ impl ReqIdMapper {
         });
         let body = serde_json::to_vec(&response).ok()?;
         let json: Value = serde_json::from_slice(&body).ok()?;
-        Some(LspFrame::from_body(json).to_bytes())
+        // FIXME
+        Some(LspFrame::new(json).to_bytes().unwrap())
     }
 }
 

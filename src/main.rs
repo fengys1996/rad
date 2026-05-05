@@ -4,6 +4,7 @@ use config::{Mode, parse_mode};
 
 pub mod client;
 pub mod config;
+pub(crate) mod error;
 pub mod instance;
 pub mod logging;
 pub mod mapper;

@@ -103,24 +103,27 @@ async fn process(manager: InstanceManagerRef, cid: u32, listen_addr: String, str
         to_client,
     ));
 
-    let ReaderExit {
-        instance_key,
-        workspace_label,
-    } = match read_task.await {
-        Ok(exit) => exit,
-        Err(e) => {
+    let may_reader_exit = match read_task.await {
+        Ok(Ok(reader_exit)) => Some(reader_exit),
+        Ok(Err(e)) => {
             warn!(cid, error = %e, "forward_client_to_instance task failed");
-            ReaderExit::default()
+            None
+        }
+        Err(e) => {
+            warn!(cid, error = %e, "forward_client_to_instance task panicked");
+            None
         }
     };
 
-    if let Some(key) = instance_key {
-        manager.remove_client(&key, cid);
-        info!(
-            cid,
-            workspace = %workspace_label,
-            "client detached from instance"
-        );
+    if let Some(reader_exit) = may_reader_exit {
+        if let Some(key) = reader_exit.instance_key {
+            manager.remove_client(&key, cid);
+            info!(
+                cid,
+                workspace = %reader_exit.workspace_label,
+                "client detached from instance"
+            );
+        }
     }
 
     if let Err(e) = writer_task.await {
@@ -196,10 +199,10 @@ async fn forward_client_to_instance(
     mut input_stream: RadMessageStream<OwnedReadHalf>,
     first_packet: LspFrame,
     to_client: Sender<Vec<u8>>,
-) -> ReaderExit {
+) -> Result<ReaderExit> {
     let mut session = ClientSessionState::default();
     let first_action =
-        make_client_packet_plan(&manager, cid, &to_client, &mut session, first_packet).await;
+        make_client_packet_plan(&manager, cid, &to_client, &mut session, first_packet).await?;
 
     match first_action {
         ClientPacketAction::ForwardToInstance { key, bytes } => {
@@ -228,7 +231,8 @@ async fn forward_client_to_instance(
             }
         };
 
-        let action = make_client_packet_plan(&manager, cid, &to_client, &mut session, packet).await;
+        let action =
+            make_client_packet_plan(&manager, cid, &to_client, &mut session, packet).await?;
 
         match action {
             ClientPacketAction::ForwardToInstance { key, bytes } => {
@@ -243,10 +247,10 @@ async fn forward_client_to_instance(
 
     info!(cid, "client socket closed");
 
-    ReaderExit {
+    Ok(ReaderExit {
         instance_key: session.instance_key,
         workspace_label: session.workspace_label,
-    }
+    })
 }
 
 async fn make_client_packet_plan(
@@ -255,10 +259,13 @@ async fn make_client_packet_plan(
     to_client: &Sender<Vec<u8>>,
     session: &mut ClientSessionState,
     packet: LspFrame,
-) -> ClientPacketAction {
+) -> Result<ClientPacketAction> {
     debug!(
         cid,
-        bytes = packet.to_bytes().len(),
+        bytes = packet
+            .to_bytes()
+            .and_then(|b| Ok(b.len()))
+            .unwrap_or_default(),
         "read lsp packet from client socket"
     );
 
@@ -278,7 +285,7 @@ async fn make_client_packet_plan(
     }
 
     let Some(key) = session.instance_key.clone() else {
-        return ClientPacketAction::Ignore;
+        return Ok(ClientPacketAction::Ignore);
     };
 
     // When attaching to an existing instance, satisfy initialize from cached capabilities
@@ -290,17 +297,17 @@ async fn make_client_packet_plan(
     {
         session.initialize_replied_from_cache = true;
         debug!(cid, workspace = %session.workspace_label, "replying initialize from cached capabilities");
-        return ClientPacketAction::ReplyToClient(response);
+        return Ok(ClientPacketAction::ReplyToClient(response));
     }
 
     if session.initialize_replied_from_cache && packet.is_method("initialized") {
         debug!(cid, workspace = %session.workspace_label, "ignoring initialized after cached initialize");
-        return ClientPacketAction::Ignore;
+        return Ok(ClientPacketAction::Ignore);
     }
 
     if packet.is_method("exit") {
         debug!(cid, workspace = %session.workspace_label, "ignoring client exit notification for shared instance");
-        return ClientPacketAction::Ignore;
+        return Ok(ClientPacketAction::Ignore);
     }
 
     // Handle shutdown locally so we can let the shared backend instance keep running.
@@ -308,13 +315,13 @@ async fn make_client_packet_plan(
         && let Some(response) = build_shutdown_response(&packet)
     {
         debug!(cid, workspace = %session.workspace_label, "replying shutdown locally for shared instance");
-        return ClientPacketAction::ReplyToClient(response);
+        return Ok(ClientPacketAction::ReplyToClient(response));
     }
 
-    ClientPacketAction::ForwardToInstance {
+    Ok(ClientPacketAction::ForwardToInstance {
         key,
-        bytes: packet.to_bytes(),
-    }
+        bytes: packet.to_bytes()?,
+    })
 }
 
 fn build_shutdown_response(packet: &LspFrame) -> Option<Vec<u8>> {
@@ -330,7 +337,8 @@ fn build_shutdown_response(packet: &LspFrame) -> Option<Vec<u8>> {
         "id": id,
         "result": null,
     });
-    Some(LspFrame::from_body(response).to_bytes())
+    // FIXME
+    Some(LspFrame::new(response).to_bytes().unwrap())
 }
 
 fn extract_workspace_key(json: &serde_json::Value) -> Option<String> {

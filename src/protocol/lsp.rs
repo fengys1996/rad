@@ -1,9 +1,14 @@
-use std::{io, str};
+use std::str;
 
 use bytes::{Buf, BytesMut};
 use serde_json::Value;
+use snafu::ResultExt;
 use tokio_util::codec::Decoder;
 use tokio_util::codec::FramedRead;
+
+use crate::error::MissingContentLengthSnafu;
+use crate::error::Result;
+use crate::error::{InvalidContentLengthSnafu, InvalidHeaderUtf8Snafu, InvalidJsonSnafu};
 
 pub type ClientId = u32;
 pub type LspFrameStream<R> = FramedRead<R, LspFrameDecoder>;
@@ -16,16 +21,16 @@ pub struct LspFrame {
 }
 
 impl LspFrame {
-    pub fn from_body(body: Value) -> Self {
+    pub fn new(body: Value) -> Self {
         Self { body }
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let body = serde_json::to_vec(&self.body).unwrap_or_else(|_| b"null".to_vec());
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let body = serde_json::to_vec(&self.body).context(InvalidJsonSnafu)?;
         let mut out = Vec::with_capacity(body.len() + 32);
         out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
         out.extend_from_slice(&body);
-        out
+        Ok(out)
     }
 
     pub fn is_method(&self, target: &str) -> bool {
@@ -37,10 +42,11 @@ impl LspFrame {
     }
 
     pub fn is_request_method(&self, target: &str) -> bool {
-        self.as_json()
+        let json_val = self.as_json();
+        json_val
             .get("method")
             .and_then(Value::as_str)
-            .map(|method| method == target && self.as_json().get("id").is_some())
+            .map(|method| method == target && json_val.get("id").is_some())
             .unwrap_or(false)
     }
 
@@ -53,12 +59,12 @@ impl LspFrame {
 pub struct LspFrameDecoder;
 
 impl LspFrameDecoder {
-    pub fn decode_packet(&mut self, src: &mut BytesMut) -> io::Result<Option<LspFrame>> {
+    pub fn decode_packet(&mut self, src: &mut BytesMut) -> Result<Option<LspFrame>> {
         let Some(header_end) = find_header_end(src.as_ref()) else {
             return Ok(None);
         };
 
-        let content_len = parse_content_len(&src[..header_end])?;
+        let content_len = parse_content_length(&src[..header_end])?;
         let body_start = header_end + HEADER_DELIMITER.len();
         let total_len = body_start + content_len;
 
@@ -68,17 +74,16 @@ impl LspFrameDecoder {
 
         let body_bytes = src[body_start..total_len].to_vec();
         src.advance(total_len);
-        let body = serde_json::from_slice(&body_bytes)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-        Ok(Some(LspFrame::from_body(body)))
+        let body = serde_json::from_slice(&body_bytes).context(InvalidJsonSnafu)?;
+        Ok(Some(LspFrame::new(body)))
     }
 }
 
 impl Decoder for LspFrameDecoder {
     type Item = LspFrame;
-    type Error = io::Error;
+    type Error = crate::error::Error;
 
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
         self.decode_packet(src)
     }
 }
@@ -88,9 +93,8 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
         .position(|window| window == HEADER_DELIMITER)
 }
 
-fn parse_content_len(headers: &[u8]) -> io::Result<usize> {
-    let headers = str::from_utf8(headers)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+fn parse_content_length(headers: &[u8]) -> Result<usize> {
+    let headers = str::from_utf8(headers).context(InvalidHeaderUtf8Snafu)?;
 
     for line in headers.split("\r\n") {
         let (name, value) = match line.split_once(':') {
@@ -99,20 +103,15 @@ fn parse_content_len(headers: &[u8]) -> io::Result<usize> {
         };
 
         if name.trim().eq_ignore_ascii_case("content-length") {
-            let len = value.trim().parse::<usize>().map_err(|err| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid Content-Length: {err}"),
-                )
-            })?;
+            let len = value
+                .trim()
+                .parse::<usize>()
+                .context(InvalidContentLengthSnafu)?;
             return Ok(len);
         }
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "missing Content-Length header",
-    ))
+    MissingContentLengthSnafu.fail()
 }
 
 #[cfg(test)]
