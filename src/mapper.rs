@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use serde_json::{Map, Number, Value};
 use tracing::debug;
 
-use crate::protocol::{ClientId, LspPacket};
+use crate::protocol::{ClientId, LspFrame};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum JsonRpcId {
@@ -60,9 +60,9 @@ impl ReqIdMapper {
     pub(crate) fn rewrite_client_packet(
         &self,
         cid: ClientId,
-        mut packet: LspPacket,
+        mut packet: LspFrame,
         pid: u32,
-    ) -> LspPacket {
+    ) -> LspFrame {
         let Some(obj) = packet.body.as_object_mut() else {
             return packet;
         };
@@ -158,7 +158,7 @@ impl ReqIdMapper {
 
     pub(crate) fn rewrite_ra_packet(
         &self,
-        packet: LspPacket,
+        packet: LspFrame,
         active_client_id: u32,
         pid: u32,
     ) -> RoutedPacket {
@@ -186,7 +186,7 @@ impl ReqIdMapper {
                 .remove(&(pending.client_id, pending.raw_req_id.clone()));
             obj.insert("id".to_string(), pending.raw_req_id.to_value());
 
-            let bytes = LspPacket::from_body(json).to_bytes();
+            let bytes = LspFrame::from_body(json).to_bytes();
 
             debug!(
                 pid,
@@ -217,7 +217,7 @@ impl ReqIdMapper {
         });
         let body = serde_json::to_vec(&response).ok()?;
         let json: Value = serde_json::from_slice(&body).ok()?;
-        Some(LspPacket::from_body(json).to_bytes())
+        Some(LspFrame::from_body(json).to_bytes())
     }
 }
 

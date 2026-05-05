@@ -9,6 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use bytes::BytesMut;
 use dashmap::DashMap;
 use serde_json::Value;
 use tokio::{
@@ -26,7 +27,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     mapper::ReqIdMapper,
-    protocol::{LspPacket, LspPacketDecoder, LspPacketStream},
+    protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
 };
 
 const INSTANCE_IDLE_TIMEOUT_SECS: i64 = 5 * 60;
@@ -485,7 +486,7 @@ async fn pump_ra_to_active_client(
     clients: Arc<DashMap<u32, ClientHandle>>,
     req_id_mapper: ReqIdMapper,
 ) {
-    let mut packet_stream = LspPacketStream::new(ra_stdout);
+    let mut frame_stream = LspFrameStream::new(ra_stdout, LspFrameDecoder);
     info!(pid, "started pump_ra_to_active_client task");
 
     loop {
@@ -494,11 +495,11 @@ async fn pump_ra_to_active_client(
                 debug!(pid, "pump_ra_to_active_client cancelled");
                 break;
             }
-            packet = packet_stream.next() => {
-                match packet {
-                    Some(Ok(packet)) => {
+            frame = frame_stream.next() => {
+                match frame {
+                    Some(Ok(frame)) => {
                         let active = active_client_id.load(Ordering::Relaxed);
-                        let routed = req_id_mapper.rewrite_ra_packet(packet, active, pid);
+                        let routed = req_id_mapper.rewrite_ra_packet(frame, active, pid);
 
                         if routed.client_id == 0 {
                             warn!(pid, bytes = routed.bytes.len(), "dropping packet without active client");
@@ -537,10 +538,11 @@ async fn pump_ra_to_active_client(
     }
 }
 
-fn decode_single_packet(bytes: &[u8]) -> std::io::Result<Option<LspPacket>> {
-    let mut decoder = LspPacketDecoder::default();
-    decoder.push(bytes);
-    decoder.next_packet()
+fn decode_single_packet(bytes: &[u8]) -> std::io::Result<Option<LspFrame>> {
+    let mut decoder = LspFrameDecoder;
+    let mut src = BytesMut::new();
+    src.extend_from_slice(bytes);
+    tokio_util::codec::Decoder::decode(&mut decoder, &mut src)
 }
 
 #[cfg(test)]
@@ -576,15 +578,15 @@ mod tests {
     fn rewrites_request_id_and_restores_response() {
         let req_id_mapper = ReqIdMapper::new();
 
-        let req = LspPacket::from_body(
+        let req = LspFrame::from_body(
             serde_json::from_slice(br#"{"jsonrpc":"2.0","id":1,"method":"textDocument/hover"}"#)
                 .expect("valid request json"),
         );
         let rewritten = req_id_mapper.rewrite_client_packet(3, req, 100);
-        let req_json = rewritten.parse_json().expect("request json");
+        let req_json = rewritten.as_json();
         let mapped = req_json["id"].as_i64().expect("mapped id should be i64");
 
-        let resp = LspPacket::from_body(
+        let resp = LspFrame::from_body(
             serde_json::from_str(&format!(
                 "{{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":null}}",
                 mapped
@@ -595,7 +597,7 @@ mod tests {
         let resp_packet = decode_single_packet(&routed.bytes)
             .unwrap()
             .expect("rewritten response packet should parse");
-        let resp_json = resp_packet.parse_json().expect("response json");
+        let resp_json = resp_packet.as_json();
 
         assert_eq!(routed.client_id, 3);
         assert_eq!(resp_json["id"], Value::Number(1.into()));

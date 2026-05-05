@@ -20,7 +20,7 @@ use crate::{
     config::DEFAULT_ADDR,
     instance::{InstanceKey, InstanceManager, InstanceManagerRef},
     protocol::{
-        LspPacket, RadMessage, RadMessageStream, TYPE_STATUS_REQ, encode_frame, encode_status_resp,
+        LspFrame, RadMessage, RadMessageStream, TYPE_STATUS_REQ, encode_frame, encode_status_resp,
     },
 };
 
@@ -68,12 +68,7 @@ pub async fn run(opts: Options) -> Result<()> {
     }
 }
 
-async fn process(
-    manager: InstanceManagerRef,
-    cid: u32,
-    listen_addr: String,
-    stream: TcpStream,
-) {
+async fn process(manager: InstanceManagerRef, cid: u32, listen_addr: String, stream: TcpStream) {
     let (to_client, from_instance) = channel::<Vec<u8>>(4);
     let (r, mut w) = stream.into_split();
     let mut msg_stream = RadMessageStream::new(r);
@@ -100,8 +95,13 @@ async fn process(
         RadMessage::Lsp(packet) => packet,
         RadMessage::Control(_) => unreachable!(),
     };
-    let read_task =
-        tokio::spawn(forward_client_to_instance(m, cid, msg_stream, first_packet, to_client));
+    let read_task = tokio::spawn(forward_client_to_instance(
+        m,
+        cid,
+        msg_stream,
+        first_packet,
+        to_client,
+    ));
 
     let ReaderExit {
         instance_key,
@@ -194,7 +194,7 @@ async fn forward_client_to_instance(
     manager: InstanceManagerRef,
     cid: u32,
     mut input_stream: RadMessageStream<OwnedReadHalf>,
-    first_packet: LspPacket,
+    first_packet: LspFrame,
     to_client: Sender<Vec<u8>>,
 ) -> ReaderExit {
     let mut session = ClientSessionState::default();
@@ -254,7 +254,7 @@ async fn make_client_packet_plan(
     cid: u32,
     to_client: &Sender<Vec<u8>>,
     session: &mut ClientSessionState,
-    packet: LspPacket,
+    packet: LspFrame,
 ) -> ClientPacketAction {
     debug!(
         cid,
@@ -317,7 +317,7 @@ async fn make_client_packet_plan(
     }
 }
 
-fn build_shutdown_response(packet: &LspPacket) -> Option<Vec<u8>> {
+fn build_shutdown_response(packet: &LspFrame) -> Option<Vec<u8>> {
     let request = packet.body.clone();
     let request_obj = request.as_object()?;
     if request_obj.get("method")?.as_str()? != "shutdown" {
@@ -330,7 +330,7 @@ fn build_shutdown_response(packet: &LspPacket) -> Option<Vec<u8>> {
         "id": id,
         "result": null,
     });
-    Some(LspPacket::from_body(response).to_bytes())
+    Some(LspFrame::from_body(response).to_bytes())
 }
 
 fn extract_workspace_key(json: &serde_json::Value) -> Option<String> {
@@ -397,6 +397,6 @@ enum ClientPacketAction {
     Ignore,
 }
 
-fn extract_request_id(packet: &LspPacket) -> Option<serde_json::Value> {
+fn extract_request_id(packet: &LspFrame) -> Option<serde_json::Value> {
     packet.body.get("id").cloned()
 }

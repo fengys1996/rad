@@ -397,6 +397,7 @@ name = "rad"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "dashmap",
  "jiff",
  "serde_json",
