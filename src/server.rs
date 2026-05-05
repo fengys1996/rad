@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use anyhow::{Result, bail};
+use jiff::Timestamp;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
@@ -144,9 +145,9 @@ async fn handle_control_stream(
         "listen_addr": listen_addr,
         "instances": instances.iter().map(|item| serde_json::json!({
             "workspace": item.workspace,
-            "ra_pid": item.ra_pid,
+            "pid": item.ra_pid,
             "client_count": item.client_count,
-            "last_used_ts": item.last_used_ts,
+            "last_used_at": format_local_time(item.last_used_ts),
             "healthy": item.healthy,
         })).collect::<Vec<_>>(),
     });
@@ -154,6 +155,14 @@ async fn handle_control_stream(
     stream.write_all(&bytes).await?;
     stream.shutdown().await?;
     Ok(())
+}
+
+fn format_local_time(unix_ts_secs: i64) -> String {
+    Timestamp::from_second(unix_ts_secs)
+        .ok()
+        .map(|ts| ts.to_zoned(jiff::tz::TimeZone::system()))
+        .map(|zdt| zdt.to_string())
+        .unwrap_or_else(|| unix_ts_secs.to_string())
 }
 
 async fn forward_instance_to_client(
