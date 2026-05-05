@@ -4,6 +4,7 @@ use serde_json::Value;
 
 pub const MAGIC: u32 = 0x1212_3001;
 pub const VERSION: u8 = 1;
+
 pub const TYPE_STATUS_REQ: u16 = 0x0001;
 pub const TYPE_STATUS_RESP: u16 = 0x0002;
 

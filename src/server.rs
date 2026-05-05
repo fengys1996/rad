@@ -6,7 +6,7 @@ use std::sync::{
 use anyhow::{Result, bail};
 use jiff::Timestamp;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     net::{
         TcpListener, TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -20,8 +20,7 @@ use crate::{
     config::DEFAULT_ADDR,
     instance::{InstanceKey, InstanceManager, InstanceManagerRef},
     protocol::{
-        LspPacket, LspPacketStream, RadMessage, RadMessageKind, TYPE_STATUS_REQ, decode_frame,
-        encode_frame, encode_status_resp,
+        LspPacket, RadMessage, RadMessageStream, TYPE_STATUS_REQ, encode_frame, encode_status_resp,
     },
 };
 
@@ -73,23 +72,36 @@ async fn process(
     manager: InstanceManagerRef,
     cid: u32,
     listen_addr: String,
-    mut stream: TcpStream,
+    stream: TcpStream,
 ) {
-    if let Ok(RadMessageKind::Control) = RadMessage::peek_kind(&stream).await {
-        if let Err(err) = handle_control_stream(&manager, &mut stream, &listen_addr).await {
+    let (to_client, from_instance) = channel::<Vec<u8>>(4);
+    let (r, mut w) = stream.into_split();
+    let mut msg_stream = RadMessageStream::new(r);
+    let first_msg = match msg_stream.next().await {
+        Some(Ok(msg)) => msg,
+        Some(Err(err)) => {
+            warn!(cid, error = %err, "failed to decode first client message");
+            return;
+        }
+        None => return,
+    };
+
+    if let RadMessage::Control(frame) = first_msg {
+        if let Err(err) = handle_control_message(&manager, &mut w, &listen_addr, frame).await {
             warn!(cid, error = %err, "failed to handle control stream");
         }
         return;
     }
 
-    let (to_client, from_instance) = channel::<Vec<u8>>(4);
-
-    let (r, w) = stream.into_split();
     let writer_task = tokio::spawn(forward_instance_to_client(cid, w, from_instance));
 
     let m = manager.clone();
-    let from_client = LspPacketStream::new(r);
-    let read_task = tokio::spawn(forward_client_to_instance(m, cid, from_client, to_client));
+    let first_packet = match first_msg {
+        RadMessage::Lsp(packet) => packet,
+        RadMessage::Control(_) => unreachable!(),
+    };
+    let read_task =
+        tokio::spawn(forward_client_to_instance(m, cid, msg_stream, first_packet, to_client));
 
     let ReaderExit {
         instance_key,
@@ -116,26 +128,16 @@ async fn process(
     }
 }
 
-async fn handle_control_stream(
+async fn handle_control_message(
     manager: &InstanceManager,
-    stream: &mut TcpStream,
+    writer: &mut OwnedWriteHalf,
     listen_addr: &str,
+    frame: crate::protocol::ControlFrame,
 ) -> std::io::Result<()> {
-    let mut header = [0u8; 13];
-    stream.read_exact(&mut header).await?;
-    let payload_len = u32::from_be_bytes([header[9], header[10], header[11], header[12]]) as usize;
-    let mut frame_bytes = header.to_vec();
-    if payload_len > 0 {
-        let mut payload = vec![0; payload_len];
-        stream.read_exact(&mut payload).await?;
-        frame_bytes.extend_from_slice(&payload);
-    }
-
-    let frame = decode_frame(&frame_bytes)?;
     if frame.msg_type != TYPE_STATUS_REQ {
         let bytes = encode_frame(0x00FF, br#"{"ok":false,"error":"unsupported_control_msg"}"#);
-        stream.write_all(&bytes).await?;
-        stream.shutdown().await?;
+        writer.write_all(&bytes).await?;
+        writer.shutdown().await?;
         return Ok(());
     }
 
@@ -152,8 +154,8 @@ async fn handle_control_stream(
         })).collect::<Vec<_>>(),
     });
     let bytes = encode_status_resp(&payload)?;
-    stream.write_all(&bytes).await?;
-    stream.shutdown().await?;
+    writer.write_all(&bytes).await?;
+    writer.shutdown().await?;
     Ok(())
 }
 
@@ -191,16 +193,37 @@ async fn forward_instance_to_client(
 async fn forward_client_to_instance(
     manager: InstanceManagerRef,
     cid: u32,
-    mut input_stream: LspPacketStream<OwnedReadHalf>,
+    mut input_stream: RadMessageStream<OwnedReadHalf>,
+    first_packet: LspPacket,
     to_client: Sender<Vec<u8>>,
 ) -> ReaderExit {
     let mut session = ClientSessionState::default();
+    let first_action =
+        make_client_packet_plan(&manager, cid, &to_client, &mut session, first_packet).await;
 
-    while let Some(packet) = input_stream.next().await {
-        let packet = match packet {
-            Ok(packet) => packet,
-            Err(e) => {
+    match first_action {
+        ClientPacketAction::ForwardToInstance { key, bytes } => {
+            manager.send_to_instance(&key, cid, bytes);
+        }
+        ClientPacketAction::ReplyToClient(bytes) => {
+            let _ = to_client.send(bytes).await;
+        }
+        ClientPacketAction::Ignore => {}
+    }
+
+    loop {
+        let msg = match input_stream.next().await {
+            Some(Ok(msg)) => msg,
+            Some(Err(e)) => {
                 warn!(cid, error = %e, "failed to decode client packet");
+                break;
+            }
+            None => break,
+        };
+        let packet = match msg {
+            RadMessage::Lsp(packet) => packet,
+            RadMessage::Control(_) => {
+                warn!(cid, "control frame is not supported in lsp client stream");
                 break;
             }
         };
