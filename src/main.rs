@@ -24,11 +24,6 @@ async fn main() -> Result<()> {
             client::run(client::Options::default()).await?;
             guard
         }
-        Mode::Status => {
-            let guard = init_logging(default_client_options());
-            client::run_status(client::Options::default()).await?;
-            guard
-        }
     };
     Ok(())
 }

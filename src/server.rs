@@ -4,7 +4,6 @@ use std::sync::{
 };
 
 use anyhow::bail;
-use jiff::Timestamp;
 use tokio::{
     io::AsyncWriteExt,
     net::{
@@ -20,9 +19,7 @@ use crate::error::Result;
 use crate::{
     config::DEFAULT_ADDR,
     instance::{InstanceKey, InstanceManager, InstanceManagerRef},
-    protocol::{
-        LspFrame, RadMessage, RadMessageStream, TYPE_STATUS_REQ, encode_frame, encode_status_resp,
-    },
+    protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
 };
 
 pub struct Options {
@@ -69,40 +66,15 @@ pub async fn run(opts: Options) -> anyhow::Result<()> {
     }
 }
 
-async fn process(manager: InstanceManagerRef, cid: u32, listen_addr: String, stream: TcpStream) {
+async fn process(manager: InstanceManagerRef, cid: u32, _listen_addr: String, stream: TcpStream) {
     let (to_client, from_instance) = channel::<Vec<u8>>(4);
-    let (r, mut w) = stream.into_split();
-    let mut msg_stream = RadMessageStream::new(r);
-    let first_msg = match msg_stream.next().await {
-        Some(Ok(msg)) => msg,
-        Some(Err(err)) => {
-            warn!(cid, error = %err, "failed to decode first client message");
-            return;
-        }
-        None => return,
-    };
+    let (r, w) = stream.into_split();
 
-    if let RadMessage::Control(frame) = first_msg {
-        if let Err(err) = handle_control_message(&manager, &mut w, &listen_addr, frame).await {
-            warn!(cid, error = %err, "failed to handle control message");
-        }
-        return;
-    }
-
-    let writer_task = tokio::spawn(forward_instance_to_client(cid, w, from_instance));
+    let write_task = tokio::spawn(forward_instance_to_client(cid, w, from_instance));
 
     let m = manager.clone();
-    let first_packet = match first_msg {
-        RadMessage::Lsp(packet) => packet,
-        RadMessage::Control(_) => unreachable!(),
-    };
-    let read_task = tokio::spawn(forward_client_to_instance(
-        m,
-        cid,
-        msg_stream,
-        first_packet,
-        to_client,
-    ));
+    let frame_stream = LspFrameStream::new(r, LspFrameDecoder);
+    let read_task = tokio::spawn(forward_client_to_instance(m, cid, frame_stream, to_client));
 
     let may_reader_exit = match read_task.await {
         Ok(Ok(reader_exit)) => Some(reader_exit),
@@ -116,59 +88,20 @@ async fn process(manager: InstanceManagerRef, cid: u32, listen_addr: String, str
         }
     };
 
-    if let Some(reader_exit) = may_reader_exit {
-        if let Some(key) = reader_exit.instance_key {
-            manager.remove_client(&key, cid);
-            info!(
-                cid,
-                workspace = %reader_exit.workspace_label,
-                "client detached from instance"
-            );
-        }
+    if let Some(reader_exit) = may_reader_exit
+        && let Some(key) = reader_exit.instance_key
+    {
+        manager.remove_client(&key, cid);
+        info!(
+            cid,
+            workspace = %reader_exit.workspace_label,
+            "client detached from instance"
+        );
     }
 
-    if let Err(e) = writer_task.await {
+    if let Err(e) = write_task.await {
         warn!(cid, error = %e, "instance_to_client task failed");
     }
-}
-
-async fn handle_control_message(
-    manager: &InstanceManager,
-    writer: &mut OwnedWriteHalf,
-    listen_addr: &str,
-    frame: crate::protocol::ControlFrame,
-) -> std::io::Result<()> {
-    if frame.msg_type != TYPE_STATUS_REQ {
-        let bytes = encode_frame(0x00FF, br#"{"ok":false,"error":"unsupported_control_msg"}"#);
-        writer.write_all(&bytes).await?;
-        writer.shutdown().await?;
-        return Ok(());
-    }
-
-    let instances = manager.status_instances().await;
-    let payload = serde_json::json!({
-        "ok": true,
-        "listen_addr": listen_addr,
-        "instances": instances.iter().map(|item| serde_json::json!({
-            "workspace": item.workspace,
-            "pid": item.ra_pid,
-            "client_count": item.client_count,
-            "last_used_at": format_local_time(item.last_used_ts),
-            "healthy": item.healthy,
-        })).collect::<Vec<_>>(),
-    });
-    let bytes = encode_status_resp(&payload)?;
-    writer.write_all(&bytes).await?;
-    writer.shutdown().await?;
-    Ok(())
-}
-
-fn format_local_time(unix_ts_secs: i64) -> String {
-    Timestamp::from_second(unix_ts_secs)
-        .ok()
-        .map(|ts| ts.to_zoned(jiff::tz::TimeZone::system()))
-        .map(|zdt| zdt.to_string())
-        .unwrap_or_else(|| unix_ts_secs.to_string())
 }
 
 async fn forward_instance_to_client(
@@ -197,43 +130,21 @@ async fn forward_instance_to_client(
 async fn forward_client_to_instance(
     manager: InstanceManagerRef,
     cid: u32,
-    mut input_stream: RadMessageStream<OwnedReadHalf>,
-    first_packet: LspFrame,
+    mut input_stream: LspFrameStream<OwnedReadHalf>,
     to_client: Sender<Vec<u8>>,
 ) -> Result<ReaderExit> {
     let mut session = ClientSessionState::default();
-    let first_action =
-        make_client_packet_plan(&manager, cid, &to_client, &mut session, first_packet).await?;
-
-    match first_action {
-        ClientPacketAction::ForwardToInstance { key, bytes } => {
-            manager.send_to_instance(&key, cid, bytes);
-        }
-        ClientPacketAction::ReplyToClient(bytes) => {
-            let _ = to_client.send(bytes).await;
-        }
-        ClientPacketAction::Ignore => {}
-    }
-
-    loop {
-        let msg = match input_stream.next().await {
-            Some(Ok(msg)) => msg,
-            Some(Err(e)) => {
-                warn!(cid, error = %e, "failed to decode client packet");
-                break;
-            }
-            None => break,
-        };
-        let packet = match msg {
-            RadMessage::Lsp(packet) => packet,
-            RadMessage::Control(_) => {
-                warn!(cid, "control frame is not supported in lsp client stream");
+    while let Some(frame) = input_stream.next().await {
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(e) => {
+                warn!(cid, error = %e, "failed to decode client frame");
                 break;
             }
         };
 
         let action =
-            make_client_packet_plan(&manager, cid, &to_client, &mut session, packet).await?;
+            make_client_packet_plan(&manager, cid, &to_client, &mut session, frame).await?;
 
         match action {
             ClientPacketAction::ForwardToInstance { key, bytes } => {
@@ -263,10 +174,7 @@ async fn make_client_packet_plan(
 ) -> Result<ClientPacketAction> {
     debug!(
         cid,
-        bytes = packet
-            .to_bytes()
-            .and_then(|b| Ok(b.len()))
-            .unwrap_or_default(),
+        bytes = packet.to_bytes().map(|b| b.len()).unwrap_or_default(),
         "read lsp packet from client socket"
     );
 
