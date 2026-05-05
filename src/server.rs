@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
 };
 
-use anyhow::{Result, bail};
+use anyhow::bail;
 use jiff::Timestamp;
 use tokio::{
     io::AsyncWriteExt,
@@ -16,6 +16,7 @@ use tokio::{
 use tokio_stream::StreamExt;
 use tracing::{debug, info, warn};
 
+use crate::error::Result;
 use crate::{
     config::DEFAULT_ADDR,
     instance::{InstanceKey, InstanceManager, InstanceManagerRef},
@@ -36,7 +37,7 @@ impl Default for Options {
     }
 }
 
-pub async fn run(opts: Options) -> Result<()> {
+pub async fn run(opts: Options) -> anyhow::Result<()> {
     let Options { server_addr } = opts;
 
     let listener = match TcpListener::bind(&server_addr).await {
@@ -56,10 +57,10 @@ pub async fn run(opts: Options) -> Result<()> {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let m = manager.clone();
-                let client_id = next_client_id.fetch_add(1, Ordering::Relaxed);
-                info!(client_id, "accepted client connection");
-
-                tokio::spawn(process(m, client_id, server_addr.clone(), stream));
+                let cid = next_client_id.fetch_add(1, Ordering::Relaxed);
+                info!(cid, "accepted client connection");
+                let server_addr = server_addr.clone();
+                tokio::spawn(process(m, cid, server_addr, stream));
             }
             Err(e) => {
                 warn!(error = ?e, "failed to accept client connection");
@@ -83,7 +84,7 @@ async fn process(manager: InstanceManagerRef, cid: u32, listen_addr: String, str
 
     if let RadMessage::Control(frame) = first_msg {
         if let Err(err) = handle_control_message(&manager, &mut w, &listen_addr, frame).await {
-            warn!(cid, error = %err, "failed to handle control stream");
+            warn!(cid, error = %err, "failed to handle control message");
         }
         return;
     }
@@ -337,7 +338,6 @@ fn build_shutdown_response(packet: &LspFrame) -> Option<Vec<u8>> {
         "id": id,
         "result": null,
     });
-    // FIXME
     Some(LspFrame::new(response).to_bytes().unwrap())
 }
 

@@ -531,7 +531,13 @@ async fn forward_ra_to_active_client(
                 match frame {
                     Some(Ok(frame)) => {
                         let active = active_client_id.load(Ordering::Relaxed);
-                        let routed = req_id_mapper.rewrite_ra_packet(frame, active, pid);
+                        let routed = match req_id_mapper.rewrite_ra_packet(frame, active, pid) {
+                            Ok(routed) => routed,
+                            Err(e) => {
+                                warn!(pid, error = %e, "failed to rewrite rust-analyzer frame, forwarding raw bytes");
+                                continue;
+                            },
+                        };
 
                         if routed.client_id == 0 {
                             warn!(pid, bytes = routed.bytes.len(), "dropping packet without active client");
@@ -626,7 +632,7 @@ mod tests {
             ))
             .expect("valid response json"),
         );
-        let routed = req_id_mapper.rewrite_ra_packet(resp, 9, 100);
+        let routed = req_id_mapper.rewrite_ra_packet(resp, 9, 100).unwrap();
         let resp_packet = decode_single_packet(&routed.bytes)
             .unwrap()
             .expect("rewritten response packet should parse");

@@ -7,6 +7,7 @@ use dashmap::DashMap;
 use serde_json::{Map, Number, Value};
 use tracing::debug;
 
+use crate::error::Result;
 use crate::protocol::{ClientId, LspFrame};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -161,15 +162,14 @@ impl ReqIdMapper {
         packet: LspFrame,
         active_client_id: u32,
         pid: u32,
-    ) -> RoutedPacket {
+    ) -> Result<RoutedPacket> {
         let mut json = packet.body.clone();
 
         let Some(obj) = json.as_object_mut() else {
-            return RoutedPacket {
+            return Ok(RoutedPacket {
                 client_id: active_client_id,
-                // FIXME
-                bytes: packet.to_bytes().unwrap(),
-            };
+                bytes: packet.to_bytes()?,
+            });
         };
 
         if is_resp(obj)
@@ -187,8 +187,7 @@ impl ReqIdMapper {
                 .remove(&(pending.client_id, pending.raw_req_id.clone()));
             obj.insert("id".to_string(), pending.raw_req_id.to_value());
 
-            // FIXME
-            let bytes = LspFrame::new(json).to_bytes().unwrap();
+            let bytes = LspFrame::new(json).to_bytes()?;
 
             debug!(
                 pid,
@@ -198,17 +197,16 @@ impl ReqIdMapper {
                 "restored response id for client"
             );
 
-            return RoutedPacket {
+            return Ok(RoutedPacket {
                 client_id: pending.client_id,
                 bytes,
-            };
+            });
         }
 
-        RoutedPacket {
+        Ok(RoutedPacket {
             client_id: active_client_id,
-            // FIXME
-            bytes: packet.to_bytes().unwrap(),
-        }
+            bytes: packet.to_bytes()?,
+        })
     }
 
     pub(crate) fn initialize_response_from_cache(&self, request_id: Value) -> Option<Vec<u8>> {
