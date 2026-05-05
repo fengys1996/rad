@@ -5,7 +5,7 @@ use std::sync::{
 
 use anyhow::{Result, bail};
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{
         TcpListener, TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -18,7 +18,10 @@ use tracing::{debug, info, warn};
 use crate::{
     config::DEFAULT_ADDR,
     instance::{InstanceKey, InstanceManager, InstanceManagerRef},
-    protocol::{LspPacket, LspPacketStream},
+    protocol::{
+        LspPacket, LspPacketStream, RadMessage, RadMessageKind, TYPE_STATUS_REQ, decode_frame,
+        encode_frame, encode_status_resp,
+    },
 };
 
 pub struct Options {
@@ -56,7 +59,7 @@ pub async fn run(opts: Options) -> Result<()> {
                 let client_id = next_client_id.fetch_add(1, Ordering::Relaxed);
                 info!(client_id, "accepted client connection");
 
-                tokio::spawn(process(m, client_id, stream));
+                tokio::spawn(process(m, client_id, server_addr.clone(), stream));
             }
             Err(e) => {
                 warn!(error = ?e, "failed to accept client connection");
@@ -65,7 +68,19 @@ pub async fn run(opts: Options) -> Result<()> {
     }
 }
 
-async fn process(manager: InstanceManagerRef, cid: u32, stream: TcpStream) {
+async fn process(
+    manager: InstanceManagerRef,
+    cid: u32,
+    listen_addr: String,
+    mut stream: TcpStream,
+) {
+    if let Ok(RadMessageKind::Control) = RadMessage::peek_kind(&stream).await {
+        if let Err(err) = handle_control_stream(&manager, &mut stream, &listen_addr).await {
+            warn!(cid, error = %err, "failed to handle control stream");
+        }
+        return;
+    }
+
     let (to_client, from_instance) = channel::<Vec<u8>>(4);
 
     let (r, w) = stream.into_split();
@@ -98,6 +113,47 @@ async fn process(manager: InstanceManagerRef, cid: u32, stream: TcpStream) {
     if let Err(e) = writer_task.await {
         warn!(cid, error = %e, "instance_to_client task failed");
     }
+}
+
+async fn handle_control_stream(
+    manager: &InstanceManager,
+    stream: &mut TcpStream,
+    listen_addr: &str,
+) -> std::io::Result<()> {
+    let mut header = [0u8; 13];
+    stream.read_exact(&mut header).await?;
+    let payload_len = u32::from_be_bytes([header[9], header[10], header[11], header[12]]) as usize;
+    let mut frame_bytes = header.to_vec();
+    if payload_len > 0 {
+        let mut payload = vec![0; payload_len];
+        stream.read_exact(&mut payload).await?;
+        frame_bytes.extend_from_slice(&payload);
+    }
+
+    let frame = decode_frame(&frame_bytes)?;
+    if frame.msg_type != TYPE_STATUS_REQ {
+        let bytes = encode_frame(0x00FF, br#"{"ok":false,"error":"unsupported_control_msg"}"#);
+        stream.write_all(&bytes).await?;
+        stream.shutdown().await?;
+        return Ok(());
+    }
+
+    let instances = manager.status_instances().await;
+    let payload = serde_json::json!({
+        "ok": true,
+        "listen_addr": listen_addr,
+        "instances": instances.iter().map(|item| serde_json::json!({
+            "workspace": item.workspace,
+            "ra_pid": item.ra_pid,
+            "client_count": item.client_count,
+            "last_used_ts": item.last_used_ts,
+            "healthy": item.healthy,
+        })).collect::<Vec<_>>(),
+    });
+    let bytes = encode_status_resp(&payload)?;
+    stream.write_all(&bytes).await?;
+    stream.shutdown().await?;
+    Ok(())
 }
 
 async fn forward_instance_to_client(

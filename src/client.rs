@@ -8,7 +8,10 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-use crate::config::DEFAULT_ADDR;
+use crate::{
+    config::DEFAULT_ADDR,
+    protocol::{TYPE_STATUS_RESP, decode_frame, encode_status_req},
+};
 
 pub struct Options {
     pub server_addr: String,
@@ -46,6 +49,34 @@ pub async fn run(opts: Options) -> Result<()> {
 
     info!("rad client proxy stopped");
 
+    Ok(())
+}
+
+pub async fn run_status(opts: Options) -> Result<()> {
+    let Options { server_addr } = opts;
+    let mut stream = TcpStream::connect(&server_addr).await?;
+    stream.write_all(&encode_status_req()).await?;
+
+    let mut header = [0u8; 13];
+    stream.read_exact(&mut header).await?;
+    let payload_len = u32::from_be_bytes([header[9], header[10], header[11], header[12]]) as usize;
+    let mut frame_bytes = header.to_vec();
+    if payload_len > 0 {
+        let mut payload = vec![0; payload_len];
+        stream.read_exact(&mut payload).await?;
+        frame_bytes.extend_from_slice(&payload);
+    }
+
+    let frame = decode_frame(&frame_bytes)?;
+    if frame.msg_type != TYPE_STATUS_RESP {
+        bail!("unexpected status response type: {}", frame.msg_type);
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&frame.payload)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".to_string())
+    );
     Ok(())
 }
 

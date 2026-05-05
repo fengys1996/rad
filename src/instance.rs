@@ -200,6 +200,31 @@ impl InstanceManager {
         let instance = self.instances.get(key)?;
         instance.build_initialize_response_from_cache(request_id)
     }
+
+    pub async fn status_instances(&self) -> Vec<InstanceStatus> {
+        let mut out = Vec::new();
+        for entry in self.instances.iter() {
+            let key = entry.key().clone();
+            let instance = entry.value().clone();
+            let healthy = instance.is_healthy().await;
+            out.push(InstanceStatus {
+                workspace: key.workspace,
+                ra_pid: instance.pid,
+                client_count: instance.clients.len(),
+                last_used_ts: instance.last_used.load(Ordering::Relaxed),
+                healthy,
+            });
+        }
+        out
+    }
+}
+
+pub struct InstanceStatus {
+    pub workspace: String,
+    pub ra_pid: u32,
+    pub client_count: usize,
+    pub last_used_ts: i64,
+    pub healthy: bool,
 }
 
 pub struct LspServerInstance {
