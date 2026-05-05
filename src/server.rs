@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
 };
 
-use anyhow::bail;
+use snafu::ResultExt;
 use tokio::{
     io::AsyncWriteExt,
     net::{
@@ -15,7 +15,7 @@ use tokio::{
 use tokio_stream::StreamExt;
 use tracing::{debug, info, warn};
 
-use crate::error::Result;
+use crate::error::{IoSnafu, Result};
 use crate::{
     config::DEFAULT_ADDR,
     instance::{InstanceKey, InstanceManager, InstanceManagerRef},
@@ -34,15 +34,14 @@ impl Default for Options {
     }
 }
 
-pub async fn run(opts: Options) -> anyhow::Result<()> {
+pub async fn run(opts: Options) -> Result<()> {
     let Options { server_addr } = opts;
 
-    let listener = match TcpListener::bind(&server_addr).await {
-        Ok(listener) => listener,
-        Err(e) => {
-            bail!("failed to bind, err: {e:?}, server_addr: {server_addr}");
-        }
-    };
+    let listener = TcpListener::bind(&server_addr)
+        .await
+        .with_context(|_| IoSnafu {
+            reason: format!("failed to bind, server addr: {}", server_addr),
+        })?;
 
     info!(server_addr, "server listening");
 
@@ -56,8 +55,7 @@ pub async fn run(opts: Options) -> anyhow::Result<()> {
                 let m = manager.clone();
                 let cid = next_client_id.fetch_add(1, Ordering::Relaxed);
                 info!(cid, "accepted client connection");
-                let server_addr = server_addr.clone();
-                tokio::spawn(process(m, cid, server_addr, stream));
+                tokio::spawn(process(m, cid, stream));
             }
             Err(e) => {
                 warn!(error = ?e, "failed to accept client connection");
@@ -66,7 +64,7 @@ pub async fn run(opts: Options) -> anyhow::Result<()> {
     }
 }
 
-async fn process(manager: InstanceManagerRef, cid: u32, _listen_addr: String, stream: TcpStream) {
+async fn process(manager: InstanceManagerRef, cid: u32, stream: TcpStream) {
     let (to_client, from_instance) = channel::<Vec<u8>>(4);
     let (r, w) = stream.into_split();
 

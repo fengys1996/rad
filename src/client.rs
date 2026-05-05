@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use snafu::ResultExt;
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::{
@@ -8,7 +8,8 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-use crate::config::DEFAULT_ADDR;
+use crate::error::Result;
+use crate::{config::DEFAULT_ADDR, error::IoSnafu};
 
 pub struct Options {
     pub server_addr: String,
@@ -25,12 +26,11 @@ impl Default for Options {
 pub async fn run(opts: Options) -> Result<()> {
     let Options { server_addr } = opts;
 
-    let stream = match TcpStream::connect(&server_addr).await {
-        Ok(stream) => stream,
-        Err(e) => {
-            bail!("failed to connect to red server, err: {e:?}, server addr: {server_addr}");
-        }
-    };
+    let stream = TcpStream::connect(&server_addr)
+        .await
+        .with_context(|_| IoSnafu {
+            reason: format!("failed to connect to red server, server addr: {server_addr}"),
+        })?;
 
     info!(server_addr, "client proxy connected to rad server");
 

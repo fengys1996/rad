@@ -6,6 +6,7 @@ use snafu::ResultExt;
 use tokio_util::codec::Decoder;
 use tokio_util::codec::FramedRead;
 
+use crate::error::Error;
 use crate::error::MissingContentLengthSnafu;
 use crate::error::Result;
 use crate::error::{InvalidContentLengthSnafu, InvalidHeaderUtf8Snafu, InvalidJsonSnafu};
@@ -81,7 +82,7 @@ impl LspFrameDecoder {
 
 impl Decoder for LspFrameDecoder {
     type Item = LspFrame;
-    type Error = crate::error::Error;
+    type Error = Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
         self.decode_packet(src)

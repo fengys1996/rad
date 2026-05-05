@@ -1,12 +1,20 @@
-use snafu::{Location, Snafu};
+use snafu::{Location, Snafu, location};
 use std::{num::ParseIntError, str::Utf8Error};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(transparent)]
+    #[snafu(display("unexpected, err: {}", err_msg))]
+    Unexpected {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("io error, {}", reason))]
     Io {
         source: std::io::Error,
+        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -40,3 +48,13 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+impl From<std::io::Error> for Error {
+    fn from(source: std::io::Error) -> Self {
+        Self::Io {
+            source,
+            reason: "".to_string(),
+            location: location!(),
+        }
+    }
+}
