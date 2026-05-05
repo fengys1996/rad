@@ -25,6 +25,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use crate::error::Result;
 use crate::{
     mapper::ReqIdMapper,
     protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
@@ -442,6 +443,7 @@ async fn handle_client_msg_to_ra(
 
     active_client_id.store(msg.client_id, Ordering::Relaxed);
     last_used.store(now_ts(), Ordering::Relaxed);
+    // TODO: optimize
     let rewritten = match decode_single_packet(&msg.bytes) {
         Ok(Some(frame)) => match req_id_mapper
             .rewrite_client_packet(msg.client_id, frame, pid)
@@ -551,12 +553,11 @@ async fn forward_ra_to_active_client(
     }
 }
 
-fn decode_single_packet(bytes: &[u8]) -> std::io::Result<Option<LspFrame>> {
+fn decode_single_packet(bytes: &[u8]) -> Result<Option<LspFrame>> {
     let mut decoder = LspFrameDecoder;
     let mut src = BytesMut::new();
     src.extend_from_slice(bytes);
-    // FIXME
-    Ok(tokio_util::codec::Decoder::decode(&mut decoder, &mut src).unwrap())
+    tokio_util::codec::Decoder::decode(&mut decoder, &mut src)
 }
 
 #[cfg(test)]
