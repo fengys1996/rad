@@ -6,6 +6,7 @@ pub mod client;
 pub mod config;
 pub mod instance;
 pub mod logging;
+pub mod mapper;
 pub mod protocol;
 pub mod server;
 
@@ -14,7 +15,7 @@ async fn main() -> Result<()> {
     let _logging_guard = match parse_mode() {
         Mode::Server => {
             let guard = init_logging(default_server_options());
-            server::run().await;
+            server::run(server::Options::default()).await?;
             guard
         }
         Mode::Client => {
