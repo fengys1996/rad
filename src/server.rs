@@ -306,6 +306,7 @@ impl Default for ClientSessionState {
 }
 
 enum ClientPacketAction {
+    // TODO: optimize make bytes to LspFrame
     ForwardToInstance { key: InstanceKey, bytes: Vec<u8> },
     ReplyToClient(Vec<u8>),
     Ignore,
