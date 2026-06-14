@@ -153,7 +153,7 @@ async fn forward_client_to_instance(
                     "sending client message to lsp instance"
                 );
 
-                if let Err(err) = handle.try_send(cid, bytes) {
+                if let Err(err) = handle.send_with_timeout(cid, bytes).await {
                     warn!(
                         cid,
                         workspace = handle.key().workspace(),

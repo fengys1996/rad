@@ -25,7 +25,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::error::Result;
+use crate::error::{InstanceSendSnafu, Result};
 use crate::{
     mapper::ReqIdMapper,
     protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
@@ -33,23 +33,13 @@ use crate::{
 
 const INSTANCE_IDLE_TIMEOUT_SECS: i64 = 5 * 60;
 const REAPER_INTERVAL_SECS: u64 = 30;
+const INSTANCE_SEND_TIMEOUT_MS: u64 = 100;
 
 pub struct InstanceManager {
     instances: DashMap<InstanceKey, LspServerInstanceRef>,
 }
 
 pub type InstanceManagerRef = Arc<InstanceManager>;
-
-/// A client-session scoped reference to an already-bound LSP instance.
-///
-/// The handle lets callers route packets to the instance without going back
-/// through `InstanceManager` on every message, while keeping the instance's
-/// queueing mechanism encapsulated in this module.
-#[derive(Clone)]
-pub struct InstanceHandle {
-    key: InstanceKey,
-    tx: Sender<ClientMessage>,
-}
 
 impl Default for InstanceManager {
     fn default() -> Self {
@@ -193,15 +183,36 @@ impl InstanceManager {
     }
 }
 
+/// A client-session scoped reference to an already-bound LSP instance.
+#[derive(Clone)]
+pub struct InstanceHandle {
+    key: InstanceKey,
+    tx: Sender<ClientMessage>,
+}
+
 impl InstanceHandle {
-    /// Returns the workspace key of the bound instance.
+    /// Returns the key of the bound LSP instance.
     pub fn key(&self) -> &InstanceKey {
         &self.key
     }
 
-    /// Enqueues one client packet for delivery to the instance's single stdin writer.
-    pub fn try_send(&self, client_id: u32, bytes: Vec<u8>) -> std::result::Result<(), tokio::sync::mpsc::error::TrySendError<ClientMessage>> {
-        self.tx.try_send(ClientMessage { client_id, bytes })
+    /// Enqueues a client packet for delivery to the instance's single stdin writer.
+    ///
+    /// This waits briefly for queue capacity instead of failing immediately when
+    /// the instance input channel is temporarily full.
+    pub async fn send_with_timeout(&self, client_id: u32, bytes: Vec<u8>) -> Result<()> {
+        self.tx
+            .send_timeout(
+                ClientMessage { client_id, bytes },
+                Duration::from_millis(INSTANCE_SEND_TIMEOUT_MS),
+            )
+            .await
+            .map_err(|err| {
+                InstanceSendSnafu {
+                    reason: err.to_string(),
+                }
+                .build()
+            })
     }
 }
 
