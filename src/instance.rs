@@ -48,6 +48,10 @@ impl InstanceManager {
     }
 }
 
+/// Spawns the background task that reaps idle LSP instances.
+///
+/// The task checks all instances every 30 seconds. An instance is reaped when
+/// it has no attached clients and has been idle for at least 5 minutes.
 async fn spawn_instance_reaper(instances: Arc<DashMap<InstanceKey, LspServerInstanceRef>>) {
     tokio::spawn(async move {
         let mut ticker = time::interval(REAPER_INTERVAL);
@@ -150,25 +154,27 @@ impl InstanceManager {
         )
     }
 
-    pub fn remove_client(&self, key: &InstanceKey, client_id: u32) {
+    /// Detaches a client from the specified LSP instance.
+    ///
+    /// This only removes the client attachment from the instance.
+    /// Detaches a client from the specified LSP instance.
+    ///
+    /// This only removes the client attachment from the instance. It does not
+    /// shutdown the instance, which may continue serving other clients or remain
+    /// alive until the idle reaper removes it.
+    pub fn detach_client(&self, key: &InstanceKey, client_id: u32) {
         let Some(instance) = self.instances.get(key) else {
             return;
         };
 
         instance.remove_client(client_id);
+
         info!(
             workspace = %key.workspace,
             client_id,
             pid = instance.pid,
-            "removed client from lsp instance"
+            "detach client from lsp instance"
         );
-    }
-
-    pub fn client_count(&self, key: &InstanceKey) -> usize {
-        self.instances
-            .get(key)
-            .map(|instance| instance.clients.len())
-            .unwrap_or(0)
     }
 
     pub fn build_initialize_response_from_cache(

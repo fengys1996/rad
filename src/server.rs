@@ -88,7 +88,7 @@ async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
     if let Some(reader_exit) = may_reader_exit
         && let Some(key) = reader_exit.instance_key
     {
-        manager.remove_client(&key, cid);
+        manager.detach_client(&key, cid);
         info!(
             cid,
             workspace = %reader_exit.workspace_label,
