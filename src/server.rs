@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 use crate::error::{IoSnafu, Result};
 use crate::{
     config::DEFAULT_ADDR,
-    instance::{InstanceKey, InstanceManager, InstanceManagerRef},
+    instance::{InstanceHandle, InstanceKey, InstanceManager, InstanceManagerRef},
     protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
 };
 
@@ -145,8 +145,22 @@ async fn forward_client_to_instance(
             make_client_packet_plan(&manager, cid, &to_client, &mut session, frame).await?;
 
         match action {
-            ClientPacketAction::ForwardToInstance { key, bytes } => {
-                manager.send_to_instance(&key, cid, bytes);
+            ClientPacketAction::ForwardToInstance { handle, bytes } => {
+                debug!(
+                    cid,
+                    workspace = handle.key().workspace(),
+                    bytes = bytes.len(),
+                    "sending client message to lsp instance"
+                );
+
+                if let Err(err) = handle.try_send(cid, bytes) {
+                    warn!(
+                        cid,
+                        workspace = handle.key().workspace(),
+                        error = %err,
+                        "failed to send message to lsp instance"
+                    );
+                }
             }
             ClientPacketAction::ReplyToClient(bytes) => {
                 let _ = to_client.send(bytes).await;
@@ -181,19 +195,21 @@ async fn make_client_packet_plan(
         session.workspace_label =
             extract_workspace_key(&packet.body).unwrap_or_else(|| "default-workspace".to_string());
         let key = InstanceKey::new(session.workspace_label.clone());
-        session.reusing_existing_instance =
-            manager.spawn_instance(cid, to_client.clone(), &key).await;
+        let (handle, reused) = manager.spawn_instance(cid, to_client.clone(), &key).await;
+        session.instance_key = Some(key);
+        session.instance_handle = Some(handle);
+        session.reusing_existing_instance = reused;
         info!(
             cid,
             workspace = %session.workspace_label,
             "client attached to instance"
         );
-        session.instance_key = Some(key);
     }
 
-    let Some(key) = session.instance_key.clone() else {
+    let Some(handle) = session.instance_handle.clone() else {
         return Ok(ClientPacketAction::Ignore);
     };
+    let key = handle.key().clone();
 
     // When attaching to an existing instance, satisfy initialize from cached capabilities
     // instead of replaying a second initialize into rust-analyzer.
@@ -226,7 +242,7 @@ async fn make_client_packet_plan(
     }
 
     Ok(ClientPacketAction::ForwardToInstance {
-        key,
+        handle,
         bytes: packet.to_bytes()?,
     })
 }
@@ -289,6 +305,7 @@ struct ReaderExit {
 
 struct ClientSessionState {
     instance_key: Option<InstanceKey>,
+    instance_handle: Option<InstanceHandle>,
     workspace_label: String,
     reusing_existing_instance: bool,
     initialize_replied_from_cache: bool,
@@ -298,6 +315,7 @@ impl Default for ClientSessionState {
     fn default() -> Self {
         Self {
             instance_key: None,
+            instance_handle: None,
             workspace_label: String::from("<unknown>"),
             reusing_existing_instance: false,
             initialize_replied_from_cache: false,
@@ -307,7 +325,10 @@ impl Default for ClientSessionState {
 
 enum ClientPacketAction {
     // TODO: optimize make bytes to LspFrame
-    ForwardToInstance { key: InstanceKey, bytes: Vec<u8> },
+    ForwardToInstance {
+        handle: InstanceHandle,
+        bytes: Vec<u8>,
+    },
     ReplyToClient(Vec<u8>),
     Ignore,
 }

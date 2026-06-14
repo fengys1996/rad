@@ -40,6 +40,17 @@ pub struct InstanceManager {
 
 pub type InstanceManagerRef = Arc<InstanceManager>;
 
+/// A client-session scoped reference to an already-bound LSP instance.
+///
+/// The handle lets callers route packets to the instance without going back
+/// through `InstanceManager` on every message, while keeping the instance's
+/// queueing mechanism encapsulated in this module.
+#[derive(Clone)]
+pub struct InstanceHandle {
+    key: InstanceKey,
+    tx: Sender<ClientMessage>,
+}
+
 impl Default for InstanceManager {
     fn default() -> Self {
         Self {
@@ -91,7 +102,7 @@ impl InstanceManager {
         client_id: u32,
         client_tx: Sender<Vec<u8>>,
         key: &InstanceKey,
-    ) -> bool {
+    ) -> (InstanceHandle, bool) {
         let mut reused = false;
         let instance = if let Some(existing) = self.instances.get(key).map(|entry| entry.clone()) {
             if existing.is_healthy().await {
@@ -142,35 +153,13 @@ impl InstanceManager {
             pid = instance.pid,
             "attached client to lsp instance"
         );
-        reused
-    }
-
-    pub fn send_to_instance(&self, key: &InstanceKey, client_id: u32, msg: Vec<u8>) {
-        let Some(instance) = self.instances.get(key) else {
-            error!(
-                "failed to send message to instance for workspace {}: instance not found",
-                key.workspace
-            );
-            return;
-        };
-
-        debug!(
-            workspace = %key.workspace,
-            client_id,
-            pid = instance.pid,
-            bytes = msg.len(),
-            "sending client message to lsp instance"
-        );
-
-        if let Err(err) = instance.sender().try_send(ClientMessage {
-            client_id,
-            bytes: msg,
-        }) {
-            error!(
-                "failed to send message to instance for workspace {}: {}",
-                key.workspace, err
-            );
-        }
+        (
+            InstanceHandle {
+                key: key.clone(),
+                tx: instance.sender(),
+            },
+            reused,
+        )
     }
 
     pub fn remove_client(&self, key: &InstanceKey, client_id: u32) {
@@ -201,6 +190,18 @@ impl InstanceManager {
     ) -> Option<Vec<u8>> {
         let instance = self.instances.get(key)?;
         instance.build_initialize_response_from_cache(request_id)
+    }
+}
+
+impl InstanceHandle {
+    /// Returns the workspace key of the bound instance.
+    pub fn key(&self) -> &InstanceKey {
+        &self.key
+    }
+
+    /// Enqueues one client packet for delivery to the instance's single stdin writer.
+    pub fn try_send(&self, client_id: u32, bytes: Vec<u8>) -> std::result::Result<(), tokio::sync::mpsc::error::TrySendError<ClientMessage>> {
+        self.tx.try_send(ClientMessage { client_id, bytes })
     }
 }
 
@@ -370,6 +371,10 @@ impl InstanceKey {
         Self {
             workspace: workspace.into(),
         }
+    }
+
+    pub fn workspace(&self) -> &str {
+        &self.workspace
     }
 
     fn workspace_dir(&self) -> Option<PathBuf> {
