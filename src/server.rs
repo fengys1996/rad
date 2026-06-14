@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 use crate::error::{IoSnafu, Result};
 use crate::{
     config::DEFAULT_ADDR,
-    instance::{InstanceHandle, InstanceKey, InstanceManager, InstanceManagerRef},
+    instance::{InstanceHandle, InstanceKey, InstanceManager},
     protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
 };
 
@@ -45,8 +45,7 @@ pub async fn run(opts: Options) -> Result<()> {
 
     info!(server_addr, "server listening");
 
-    let manager = Arc::new(InstanceManager::default());
-    manager.clone().start_reaper();
+    let manager = InstanceManager::new().await;
     let next_client_id = Arc::new(AtomicU32::new(1));
 
     loop {
@@ -64,7 +63,7 @@ pub async fn run(opts: Options) -> Result<()> {
     }
 }
 
-async fn process(manager: InstanceManagerRef, cid: u32, stream: TcpStream) {
+async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
     let (to_client, from_instance) = channel::<Vec<u8>>(4);
     let (r, w) = stream.into_split();
 
@@ -126,7 +125,7 @@ async fn forward_instance_to_client(
 }
 
 async fn forward_client_to_instance(
-    manager: InstanceManagerRef,
+    manager: InstanceManager,
     cid: u32,
     mut input_stream: LspFrameStream<OwnedReadHalf>,
     to_client: Sender<Vec<u8>>,

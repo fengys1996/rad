@@ -31,62 +31,60 @@ use crate::{
     protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
 };
 
-const INSTANCE_IDLE_TIMEOUT_SECS: i64 = 5 * 60;
-const REAPER_INTERVAL_SECS: u64 = 30;
 const INSTANCE_SEND_TIMEOUT_MS: u64 = 100;
+const REAPER_INTERVAL: Duration = Duration::from_secs(30);
+const IDLE_TIMEOUT_SECS: i64 = 5 * 60;
 
+#[derive(Clone)]
 pub struct InstanceManager {
-    instances: DashMap<InstanceKey, LspServerInstanceRef>,
+    instances: Arc<DashMap<InstanceKey, LspServerInstanceRef>>,
 }
 
-pub type InstanceManagerRef = Arc<InstanceManager>;
+impl InstanceManager {
+    pub async fn new() -> Self {
+        let instances = Arc::new(DashMap::new());
+        spawn_instance_reaper(instances.clone()).await;
+        Self { instances }
+    }
+}
 
-impl Default for InstanceManager {
-    fn default() -> Self {
-        Self {
-            instances: DashMap::new(),
+async fn spawn_instance_reaper(instances: Arc<DashMap<InstanceKey, LspServerInstanceRef>>) {
+    tokio::spawn(async move {
+        let mut ticker = time::interval(REAPER_INTERVAL);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            reap_idle_instances(&instances).await;
+        }
+    });
+}
+
+async fn reap_idle_instances(instances: &DashMap<InstanceKey, LspServerInstanceRef>) {
+    let now = now_ts();
+    let mut to_remove = Vec::new();
+
+    for entry in instances.iter() {
+        let instance = entry.value();
+        let inactive_secs = now - instance.last_used.load(Ordering::Relaxed);
+        if instance.clients.is_empty() && inactive_secs >= IDLE_TIMEOUT_SECS {
+            to_remove.push((entry.key().clone(), instance.clone(), inactive_secs));
+        }
+    }
+
+    for (key, instance, inactive_secs) in to_remove {
+        if instances.remove(&key).is_some() {
+            info!(
+                workspace = %key.workspace,
+                pid = instance.pid,
+                inactive_secs,
+                "reaping idle lsp instance"
+            );
+            instance.shutdown().await;
         }
     }
 }
 
 impl InstanceManager {
-    pub fn start_reaper(self: Arc<Self>) {
-        tokio::spawn(async move {
-            let mut ticker = time::interval(Duration::from_secs(REAPER_INTERVAL_SECS));
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-            loop {
-                ticker.tick().await;
-                self.reap_idle_instances().await;
-            }
-        });
-    }
-
-    async fn reap_idle_instances(&self) {
-        let now = now_ts();
-        let mut to_remove = Vec::new();
-
-        for entry in self.instances.iter() {
-            let instance = entry.value();
-            let inactive_secs = now - instance.last_used.load(Ordering::Relaxed);
-            if instance.clients.is_empty() && inactive_secs >= INSTANCE_IDLE_TIMEOUT_SECS {
-                to_remove.push((entry.key().clone(), instance.clone(), inactive_secs));
-            }
-        }
-
-        for (key, instance, inactive_secs) in to_remove {
-            if self.instances.remove(&key).is_some() {
-                info!(
-                    workspace = %key.workspace,
-                    pid = instance.pid,
-                    inactive_secs,
-                    "reaping idle lsp instance"
-                );
-                instance.shutdown().await;
-            }
-        }
-    }
-
     pub async fn spawn_instance(
         &self,
         client_id: u32,
