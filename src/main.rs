@@ -1,9 +1,9 @@
 use crate::logging::{default_client_options, default_server_options, init_logging};
-use anyhow::Result;
 use config::{Mode, parse_mode};
 
 pub mod client;
 pub mod config;
+pub(crate) mod error;
 pub mod instance;
 pub mod logging;
 pub mod mapper;
@@ -11,7 +11,7 @@ pub mod protocol;
 pub mod server;
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _logging_guard = match parse_mode() {
         Mode::Server => {
             let guard = init_logging(default_server_options());

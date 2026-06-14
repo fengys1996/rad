@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
 };
 
-use anyhow::{Result, bail};
+use snafu::ResultExt;
 use tokio::{
     io::AsyncWriteExt,
     net::{
@@ -15,10 +15,11 @@ use tokio::{
 use tokio_stream::StreamExt;
 use tracing::{debug, info, warn};
 
+use crate::error::{IoSnafu, Result};
 use crate::{
     config::DEFAULT_ADDR,
     instance::{InstanceKey, InstanceManager, InstanceManagerRef},
-    protocol::{LspPacket, LspPacketStream},
+    protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
 };
 
 pub struct Options {
@@ -36,12 +37,11 @@ impl Default for Options {
 pub async fn run(opts: Options) -> Result<()> {
     let Options { server_addr } = opts;
 
-    let listener = match TcpListener::bind(&server_addr).await {
-        Ok(listener) => listener,
-        Err(e) => {
-            bail!("failed to bind, err: {e:?}, server_addr: {server_addr}");
-        }
-    };
+    let listener = TcpListener::bind(&server_addr)
+        .await
+        .with_context(|_| IoSnafu {
+            reason: format!("failed to bind, server addr: {}", server_addr),
+        })?;
 
     info!(server_addr, "server listening");
 
@@ -53,10 +53,9 @@ pub async fn run(opts: Options) -> Result<()> {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let m = manager.clone();
-                let client_id = next_client_id.fetch_add(1, Ordering::Relaxed);
-                info!(client_id, "accepted client connection");
-
-                tokio::spawn(process(m, client_id, stream));
+                let cid = next_client_id.fetch_add(1, Ordering::Relaxed);
+                info!(cid, "accepted client connection");
+                tokio::spawn(process(m, cid, stream));
             }
             Err(e) => {
                 warn!(error = ?e, "failed to accept client connection");
@@ -67,35 +66,38 @@ pub async fn run(opts: Options) -> Result<()> {
 
 async fn process(manager: InstanceManagerRef, cid: u32, stream: TcpStream) {
     let (to_client, from_instance) = channel::<Vec<u8>>(4);
-
     let (r, w) = stream.into_split();
-    let writer_task = tokio::spawn(forward_instance_to_client(cid, w, from_instance));
+
+    let write_task = tokio::spawn(forward_instance_to_client(cid, w, from_instance));
 
     let m = manager.clone();
-    let from_client = LspPacketStream::new(r);
-    let read_task = tokio::spawn(forward_client_to_instance(m, cid, from_client, to_client));
+    let frame_stream = LspFrameStream::new(r, LspFrameDecoder);
+    let read_task = tokio::spawn(forward_client_to_instance(m, cid, frame_stream, to_client));
 
-    let ReaderExit {
-        instance_key,
-        workspace_label,
-    } = match read_task.await {
-        Ok(exit) => exit,
-        Err(e) => {
+    let may_reader_exit = match read_task.await {
+        Ok(Ok(reader_exit)) => Some(reader_exit),
+        Ok(Err(e)) => {
             warn!(cid, error = %e, "forward_client_to_instance task failed");
-            ReaderExit::default()
+            None
+        }
+        Err(e) => {
+            warn!(cid, error = %e, "forward_client_to_instance task panicked");
+            None
         }
     };
 
-    if let Some(key) = instance_key {
+    if let Some(reader_exit) = may_reader_exit
+        && let Some(key) = reader_exit.instance_key
+    {
         manager.remove_client(&key, cid);
         info!(
             cid,
-            workspace = %workspace_label,
+            workspace = %reader_exit.workspace_label,
             "client detached from instance"
         );
     }
 
-    if let Err(e) = writer_task.await {
+    if let Err(e) = write_task.await {
         warn!(cid, error = %e, "instance_to_client task failed");
     }
 }
@@ -126,21 +128,21 @@ async fn forward_instance_to_client(
 async fn forward_client_to_instance(
     manager: InstanceManagerRef,
     cid: u32,
-    mut input_stream: LspPacketStream<OwnedReadHalf>,
+    mut input_stream: LspFrameStream<OwnedReadHalf>,
     to_client: Sender<Vec<u8>>,
-) -> ReaderExit {
+) -> Result<ReaderExit> {
     let mut session = ClientSessionState::default();
-
-    while let Some(packet) = input_stream.next().await {
-        let packet = match packet {
-            Ok(packet) => packet,
+    while let Some(frame) = input_stream.next().await {
+        let frame = match frame {
+            Ok(frame) => frame,
             Err(e) => {
-                warn!(cid, error = %e, "failed to decode client packet");
+                warn!(cid, error = %e, "failed to decode client frame");
                 break;
             }
         };
 
-        let action = make_client_packet_plan(&manager, cid, &to_client, &mut session, packet).await;
+        let action =
+            make_client_packet_plan(&manager, cid, &to_client, &mut session, frame).await?;
 
         match action {
             ClientPacketAction::ForwardToInstance { key, bytes } => {
@@ -155,10 +157,10 @@ async fn forward_client_to_instance(
 
     info!(cid, "client socket closed");
 
-    ReaderExit {
+    Ok(ReaderExit {
         instance_key: session.instance_key,
         workspace_label: session.workspace_label,
-    }
+    })
 }
 
 async fn make_client_packet_plan(
@@ -166,11 +168,11 @@ async fn make_client_packet_plan(
     cid: u32,
     to_client: &Sender<Vec<u8>>,
     session: &mut ClientSessionState,
-    packet: LspPacket,
-) -> ClientPacketAction {
+    packet: LspFrame,
+) -> Result<ClientPacketAction> {
     debug!(
         cid,
-        bytes = packet.to_bytes().len(),
+        bytes = packet.to_bytes().map(|b| b.len()).unwrap_or_default(),
         "read lsp packet from client socket"
     );
 
@@ -190,7 +192,7 @@ async fn make_client_packet_plan(
     }
 
     let Some(key) = session.instance_key.clone() else {
-        return ClientPacketAction::Ignore;
+        return Ok(ClientPacketAction::Ignore);
     };
 
     // When attaching to an existing instance, satisfy initialize from cached capabilities
@@ -202,17 +204,17 @@ async fn make_client_packet_plan(
     {
         session.initialize_replied_from_cache = true;
         debug!(cid, workspace = %session.workspace_label, "replying initialize from cached capabilities");
-        return ClientPacketAction::ReplyToClient(response);
+        return Ok(ClientPacketAction::ReplyToClient(response));
     }
 
     if session.initialize_replied_from_cache && packet.is_method("initialized") {
         debug!(cid, workspace = %session.workspace_label, "ignoring initialized after cached initialize");
-        return ClientPacketAction::Ignore;
+        return Ok(ClientPacketAction::Ignore);
     }
 
     if packet.is_method("exit") {
         debug!(cid, workspace = %session.workspace_label, "ignoring client exit notification for shared instance");
-        return ClientPacketAction::Ignore;
+        return Ok(ClientPacketAction::Ignore);
     }
 
     // Handle shutdown locally so we can let the shared backend instance keep running.
@@ -220,16 +222,16 @@ async fn make_client_packet_plan(
         && let Some(response) = build_shutdown_response(&packet)
     {
         debug!(cid, workspace = %session.workspace_label, "replying shutdown locally for shared instance");
-        return ClientPacketAction::ReplyToClient(response);
+        return Ok(ClientPacketAction::ReplyToClient(response));
     }
 
-    ClientPacketAction::ForwardToInstance {
+    Ok(ClientPacketAction::ForwardToInstance {
         key,
-        bytes: packet.to_bytes(),
-    }
+        bytes: packet.to_bytes()?,
+    })
 }
 
-fn build_shutdown_response(packet: &LspPacket) -> Option<Vec<u8>> {
+fn build_shutdown_response(packet: &LspFrame) -> Option<Vec<u8>> {
     let request = packet.body.clone();
     let request_obj = request.as_object()?;
     if request_obj.get("method")?.as_str()? != "shutdown" {
@@ -242,7 +244,7 @@ fn build_shutdown_response(packet: &LspPacket) -> Option<Vec<u8>> {
         "id": id,
         "result": null,
     });
-    Some(LspPacket::from_body(response).to_bytes())
+    Some(LspFrame::new(response).to_bytes().unwrap())
 }
 
 fn extract_workspace_key(json: &serde_json::Value) -> Option<String> {
@@ -304,11 +306,12 @@ impl Default for ClientSessionState {
 }
 
 enum ClientPacketAction {
+    // TODO: optimize make bytes to LspFrame
     ForwardToInstance { key: InstanceKey, bytes: Vec<u8> },
     ReplyToClient(Vec<u8>),
     Ignore,
 }
 
-fn extract_request_id(packet: &LspPacket) -> Option<serde_json::Value> {
+fn extract_request_id(packet: &LspFrame) -> Option<serde_json::Value> {
     packet.body.get("id").cloned()
 }

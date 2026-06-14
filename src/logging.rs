@@ -1,4 +1,5 @@
-use anyhow::{Context, Result, anyhow};
+use crate::error::{IoSnafu, Result, UnexpectedSnafu};
+use snafu::ResultExt;
 use std::{
     fs::{OpenOptions, create_dir_all},
     path::PathBuf,
@@ -17,15 +18,18 @@ pub fn init_logging(opts: LoggingOptions) -> Result<WorkerGuard> {
     };
 
     if let Some(parent) = file_path.parent() {
-        create_dir_all(parent)
-            .with_context(|| format!("failed to create log directory {parent:?}"))?;
+        create_dir_all(parent).with_context(|_| IoSnafu {
+            reason: format!("failed to create log directory {parent:?}"),
+        })?;
     }
 
     let file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&file_path)
-        .with_context(|| format!("failed to open log file {file_path:?}"))?;
+        .with_context(|_| IoSnafu {
+            reason: format!("failed to open log file {file_path:?}"),
+        })?;
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| level.into());
     let (file_appender, guard) = tracing_appender::non_blocking(file);
@@ -34,7 +38,12 @@ pub fn init_logging(opts: LoggingOptions) -> Result<WorkerGuard> {
         .with_env_filter(env_filter)
         .with_writer(file_appender)
         .try_init()
-        .map_err(|err| anyhow!("failed to init tracing subscriber: {err:?}"))?;
+        .map_err(|e| {
+            UnexpectedSnafu {
+                err_msg: format!("failed to init tracing subscriber: {:?}", e),
+            }
+            .build()
+        })?;
 
     Ok(guard)
 }
