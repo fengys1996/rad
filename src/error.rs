@@ -11,6 +11,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("{msg}"))]
+    PlainText {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("io error, {}", reason))]
     Io {
         source: std::io::Error,
@@ -42,13 +49,6 @@ pub enum Error {
     #[snafu(display("invalid json"))]
     InvalidJson {
         source: serde_json::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("failed to enqueue client message for lsp instance: {reason}"))]
-    InstanceSend {
-        reason: String,
         #[snafu(implicit)]
         location: Location,
     },

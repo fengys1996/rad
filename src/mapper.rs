@@ -218,7 +218,6 @@ impl ReqIdMapper {
         });
         let body = serde_json::to_vec(&response).ok()?;
         let json: Value = serde_json::from_slice(&body).ok()?;
-        // FIXME
         Some(LspFrame::new(json).to_bytes().unwrap())
     }
 }

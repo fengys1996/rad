@@ -194,7 +194,7 @@ async fn make_client_packet_plan(
         session.workspace_label =
             extract_workspace_key(&packet.body).unwrap_or_else(|| "default-workspace".to_string());
         let key = InstanceKey::new(session.workspace_label.clone());
-        let (handle, reused) = manager.spawn_instance(cid, to_client.clone(), &key).await;
+        let (handle, reused) = manager.spawn_instance(cid, to_client.clone(), &key).await?;
         session.instance_key = Some(key);
         session.instance_handle = Some(handle);
         session.reusing_existing_instance = reused;

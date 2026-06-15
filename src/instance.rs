@@ -12,6 +12,7 @@ use std::{
 use bytes::BytesMut;
 use dashmap::DashMap;
 use serde_json::Value;
+use snafu::OptionExt;
 use tokio::{
     io::AsyncWriteExt,
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -25,7 +26,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::error::{InstanceSendSnafu, Result};
+use crate::error::{PlainTextSnafu, Result};
 use crate::{
     mapper::ReqIdMapper,
     protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
@@ -37,14 +38,39 @@ const IDLE_TIMEOUT_SECS: i64 = 5 * 60;
 
 #[derive(Clone)]
 pub struct InstanceManager {
-    instances: Arc<DashMap<InstanceKey, LspServerInstanceRef>>,
+    instances: Arc<DashMap<InstanceKey, InstanceRef>>,
 }
 
 impl InstanceManager {
+    /// Creates a new [`InstanceManager`] and starts the background idle-instance
+    /// reaper task.
     pub async fn new() -> Self {
         let instances = Arc::new(DashMap::new());
         spawn_instance_reaper(instances.clone()).await;
         Self { instances }
+    }
+
+    /// Detaches a client from the specified LSP instance.
+    ///
+    /// This only removes the client attachment from the instance.
+    /// Detaches a client from the specified LSP instance.
+    ///
+    /// This only removes the client attachment from the instance. It does not
+    /// shutdown the instance, which may continue serving other clients or remain
+    /// alive until the idle reaper removes it.
+    pub fn detach_client(&self, key: &InstanceKey, client_id: u32) {
+        let Some(instance) = self.instances.get(key) else {
+            return;
+        };
+
+        instance.detach_client(client_id);
+
+        info!(
+            workspace = %key.workspace,
+            client_id,
+            pid = instance.pid,
+            "detach client from lsp instance"
+        );
     }
 }
 
@@ -52,7 +78,7 @@ impl InstanceManager {
 ///
 /// The task checks all instances every 30 seconds. An instance is reaped when
 /// it has no attached clients and has been idle for at least 5 minutes.
-async fn spawn_instance_reaper(instances: Arc<DashMap<InstanceKey, LspServerInstanceRef>>) {
+async fn spawn_instance_reaper(instances: Arc<DashMap<InstanceKey, InstanceRef>>) {
     tokio::spawn(async move {
         let mut ticker = time::interval(REAPER_INTERVAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -63,7 +89,7 @@ async fn spawn_instance_reaper(instances: Arc<DashMap<InstanceKey, LspServerInst
     });
 }
 
-async fn reap_idle_instances(instances: &DashMap<InstanceKey, LspServerInstanceRef>) {
+async fn reap_idle_instances(instances: &DashMap<InstanceKey, InstanceRef>) {
     let now = now_ts();
     let mut to_remove = Vec::new();
 
@@ -92,9 +118,9 @@ impl InstanceManager {
     pub async fn spawn_instance(
         &self,
         client_id: u32,
-        client_tx: Sender<Vec<u8>>,
+        to_client: Sender<Vec<u8>>,
         key: &InstanceKey,
-    ) -> (InstanceHandle, bool) {
+    ) -> Result<(InstanceHandle, bool)> {
         let mut reused = false;
         let instance = if let Some(existing) = self.instances.get(key).map(|entry| entry.clone()) {
             if existing.is_healthy().await {
@@ -114,7 +140,7 @@ impl InstanceManager {
                     );
                     stale.shutdown().await;
                 }
-                let instance = Arc::new(LspServerInstance::new(key.workspace_dir()));
+                let instance = Arc::new(Instance::new(key.workspace_dir())?);
                 info!(
                     workspace = %key.workspace,
                     pid = instance.pid,
@@ -124,7 +150,7 @@ impl InstanceManager {
                 instance
             }
         } else {
-            let instance = Arc::new(LspServerInstance::new(key.workspace_dir()));
+            let instance = Arc::new(Instance::new(key.workspace_dir())?);
             info!(
                 workspace = %key.workspace,
                 pid = instance.pid,
@@ -134,9 +160,9 @@ impl InstanceManager {
             instance
         };
 
-        instance.add_client(ClientHandle {
+        instance.attach_client(ClientHandle {
             id: client_id,
-            tx: client_tx,
+            tx: to_client,
         });
         instance.set_active_client(client_id);
         info!(
@@ -145,36 +171,13 @@ impl InstanceManager {
             pid = instance.pid,
             "attached client to lsp instance"
         );
-        (
+        Ok((
             InstanceHandle {
                 key: key.clone(),
-                tx: instance.sender(),
+                tx: instance.lsp_tx.clone(),
             },
             reused,
-        )
-    }
-
-    /// Detaches a client from the specified LSP instance.
-    ///
-    /// This only removes the client attachment from the instance.
-    /// Detaches a client from the specified LSP instance.
-    ///
-    /// This only removes the client attachment from the instance. It does not
-    /// shutdown the instance, which may continue serving other clients or remain
-    /// alive until the idle reaper removes it.
-    pub fn detach_client(&self, key: &InstanceKey, client_id: u32) {
-        let Some(instance) = self.instances.get(key) else {
-            return;
-        };
-
-        instance.remove_client(client_id);
-
-        info!(
-            workspace = %key.workspace,
-            client_id,
-            pid = instance.pid,
-            "detach client from lsp instance"
-        );
+        ))
     }
 
     pub fn build_initialize_response_from_cache(
@@ -212,15 +215,15 @@ impl InstanceHandle {
             )
             .await
             .map_err(|err| {
-                InstanceSendSnafu {
-                    reason: err.to_string(),
+                PlainTextSnafu {
+                    msg: format!("failed to enqueue client message for lsp instance: {err}"),
                 }
                 .build()
             })
     }
 }
 
-pub struct LspServerInstance {
+struct Instance {
     pid: u32,
     process: Mutex<Child>,
     lsp_tx: Sender<ClientMessage>,
@@ -231,21 +234,10 @@ pub struct LspServerInstance {
     req_id_mapper: ReqIdMapper,
 }
 
-pub type LspServerInstanceRef = Arc<LspServerInstance>;
+type InstanceRef = Arc<Instance>;
 
-pub struct ClientMessage {
-    pub client_id: u32,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Clone)]
-pub struct ClientHandle {
-    pub id: u32,
-    pub tx: Sender<Vec<u8>>,
-}
-
-impl LspServerInstance {
-    pub fn new(workspace_dir: Option<PathBuf>) -> LspServerInstance {
+impl Instance {
+    fn new(workspace_dir: Option<PathBuf>) -> Result<Instance> {
         let mut command = Command::new("rust-analyzer");
         command
             .stdin(Stdio::piped())
@@ -254,12 +246,21 @@ impl LspServerInstance {
         if let Some(dir) = workspace_dir {
             command.current_dir(dir);
         }
-        let mut proc = command.spawn().unwrap();
+        let mut process = command.spawn()?;
 
-        let pid = proc.id().unwrap_or_default();
-        let stdin = proc.stdin.take().expect("rust-analyzer stdin is piped");
-        let stdout = proc.stdout.take().expect("rust-analyzer stdout is piped");
-        let (tx, rx) = channel(32);
+        let pid = process.id().context(PlainTextSnafu {
+            msg: "failed to read lsp instance id, since lsp instance may have already shut down",
+        })?;
+
+        let stdin = process.stdin.take().context(PlainTextSnafu {
+            msg: "failed to get stdin of lsp instance",
+        })?;
+        let stdout = process.stdout.take().context(PlainTextSnafu {
+            msg: "failed to get stdout of lsp instance",
+        })?;
+        let process = Mutex::new(process);
+
+        let (lsp_tx, rx) = channel(32);
         let cancel = CancellationToken::new();
         let last_used = Arc::new(AtomicI64::new(now_ts()));
         let active_client_id = Arc::new(AtomicU32::new(0));
@@ -284,52 +285,41 @@ impl LspServerInstance {
             req_id_mapper.clone(),
         ));
 
-        LspServerInstance {
+        Ok(Instance {
             pid,
-            process: Mutex::new(proc),
-            lsp_tx: tx,
+            process,
+            lsp_tx,
             cancel,
             last_used,
             active_client_id,
             clients,
             req_id_mapper,
-        }
+        })
     }
 
-    pub fn add_client(&self, client: ClientHandle) {
+    fn attach_client(&self, client: ClientHandle) {
         let client_id = client.id;
         self.clients.insert(client.id, client);
         info!(client_id, pid = self.pid, "registered client handle");
     }
 
-    pub fn sender(&self) -> Sender<ClientMessage> {
-        self.lsp_tx.clone()
-    }
-
-    pub fn remove_client(&self, client_id: u32) -> Option<(u32, ClientHandle)> {
+    fn detach_client(&self, client_id: u32) -> Option<(u32, ClientHandle)> {
         let removed = self.clients.remove(&client_id);
-
         if removed.is_none() {
             warn!(
                 client_id,
                 pid = self.pid,
-                "client handle not found during removal"
+                "client handle not found during detach"
             );
         }
-
         removed
     }
 
-    pub fn set_active_client(&self, client_id: u32) {
+    fn set_active_client(&self, client_id: u32) {
         self.active_client_id.store(client_id, Ordering::Relaxed);
     }
 
-    pub fn active_client(&self) -> Option<ClientHandle> {
-        let client_id = self.active_client_id.load(Ordering::Relaxed);
-        self.clients.get(&client_id).map(|client| client.clone())
-    }
-
-    pub async fn is_healthy(&self) -> bool {
+    async fn is_healthy(&self) -> bool {
         if self.lsp_tx.is_closed() {
             return false;
         }
@@ -352,12 +342,7 @@ impl LspServerInstance {
         }
     }
 
-    pub fn build_initialize_response_from_cache(&self, request_id: Value) -> Option<Vec<u8>> {
-        self.req_id_mapper
-            .initialize_response_from_cache(request_id)
-    }
-
-    pub async fn shutdown(&self) {
+    async fn shutdown(&self) {
         self.cancel.cancel();
         info!(pid = self.pid, "shutting down lsp instance");
 
@@ -367,13 +352,26 @@ impl LspServerInstance {
             error!("failed to kill rust-analyzer, pid {}, error: {e}", self.pid);
         }
 
-        if let Err(err) = process.wait().await {
-            error!(
-                "failed to reap rust-analyzer, pid {}, error: {err}",
-                self.pid
-            );
+        if let Err(e) = process.wait().await {
+            error!("failed to reap rust-analyzer, pid {}, error: {e}", self.pid);
         }
     }
+
+    fn build_initialize_response_from_cache(&self, request_id: Value) -> Option<Vec<u8>> {
+        self.req_id_mapper
+            .initialize_response_from_cache(request_id)
+    }
+}
+
+struct ClientMessage {
+    pub client_id: u32,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct ClientHandle {
+    pub id: u32,
+    pub tx: Sender<Vec<u8>>,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -596,7 +594,7 @@ mod tests {
             );
         }
 
-        let instance = LspServerInstance::new(None);
+        let instance = Instance::new(None).unwrap();
 
         instance.shutdown().await;
 
