@@ -22,30 +22,57 @@ rad_bin="${rad_cargo_home}/bin/rad"
 rad_path="${rad_cargo_home}/bin:/usr/local/bin:/usr/bin:/bin"
 
 pidfile="/var/run/${name}.pid"
-command="/usr/sbin/daemon"
-procname="${command}"
+command="${rad_bin}"
+procname="${rad_bin}"
 
 start_cmd="${name}_start"
+stop_cmd="${name}_stop"
 
 rad_start()
 {
     echo "Starting ${name}..."
 
-    cd "${rad_home}" || exit 1
-
-    /usr/sbin/daemon \
-        -f \
-        -P "${pidfile}" \
-        -u "${rad_user}" \
-        /usr/bin/env \
+    su -m "${rad_user}" -c "\
+        env \
         RUST_LOG=info \
-        HOME="${rad_home}" \
-        USER="${rad_user}" \
-        LOGNAME="${rad_user}" \
-        CARGO_HOME="${rad_cargo_home}" \
-        PATH="${rad_path}" \
-        RUSTUP_HOME="${rad_rustup_home}" \
-        "${rad_bin}" ${rad_args}
+        HOME='${rad_home}' \
+        USER='${rad_user}' \
+        LOGNAME='${rad_user}' \
+        CARGO_HOME='${rad_cargo_home}' \
+        PATH='${rad_path}' \
+        RUSTUP_HOME='${rad_rustup_home}' \
+        sh -c 'cd \"${rad_home}\" || exit 1; nohup \"${rad_bin}\" ${rad_args} >/dev/null 2>&1 & echo \$!'\
+    " > "${pidfile}" || return 1
+}
+
+rad_stop()
+{
+    if [ ! -f "${pidfile}" ]; then
+        echo "${name} not running? (check ${pidfile})."
+        return 1
+    fi
+
+    _pid=$(cat "${pidfile}")
+    if [ -z "${_pid}" ] || ! kill -0 "${_pid}" 2>/dev/null; then
+        echo "${name} not running? (check ${pidfile})."
+        rm -f "${pidfile}"
+        return 1
+    fi
+
+    echo "Stopping ${name}."
+    kill -TERM "${_pid}" || return 1
+
+    _i=0
+    while kill -0 "${_pid}" 2>/dev/null; do
+        _i=$((_i + 1))
+        if [ "${_i}" -ge 50 ]; then
+            echo "Timed out stopping ${name}."
+            return 1
+        fi
+        sleep 1
+    done
+
+    rm -f "${pidfile}"
 }
 
 run_rc_command "$1"
