@@ -1,0 +1,51 @@
+#!/bin/sh
+
+# PROVIDE: rad
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="rad"
+rcvar=rad_enable
+
+load_rc_config $name
+
+: ${rad_enable:="NO"}
+: ${rad_user:="fys"}
+: ${rad_home:="/home/${rad_user}"}
+: ${rad_args:="server"}
+
+rad_cargo_home="${rad_home}/.cargo"
+rad_rustup_home="${rad_home}/.rustup"
+rad_bin="${rad_cargo_home}/bin/rad"
+rad_path="${rad_cargo_home}/bin:/usr/local/bin:/usr/bin:/bin"
+
+pidfile="/var/run/${name}.pid"
+command="/usr/sbin/daemon"
+procname="${command}"
+
+start_cmd="${name}_start"
+
+rad_start()
+{
+    echo "Starting ${name}..."
+
+    cd "${rad_home}" || exit 1
+
+    /usr/sbin/daemon \
+        -f \
+        -P "${pidfile}" \
+        -u "${rad_user}" \
+        /usr/bin/env \
+        RUST_LOG=info \
+        HOME="${rad_home}" \
+        USER="${rad_user}" \
+        LOGNAME="${rad_user}" \
+        CARGO_HOME="${rad_cargo_home}" \
+        PATH="${rad_path}" \
+        RUSTUP_HOME="${rad_rustup_home}" \
+        "${rad_bin}" ${rad_args}
+}
+
+run_rc_command "$1"
