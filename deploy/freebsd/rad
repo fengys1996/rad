@@ -14,12 +14,8 @@ load_rc_config $name
 : ${rad_enable:="NO"}
 : ${rad_user:="fys"}
 : ${rad_home:="/home/${rad_user}"}
+: ${rad_bin:="/usr/local/bin/rad"}
 : ${rad_args:="server"}
-
-rad_cargo_home="${rad_home}/.cargo"
-rad_rustup_home="${rad_home}/.rustup"
-rad_bin="${rad_cargo_home}/bin/rad"
-rad_path="${rad_cargo_home}/bin:/usr/local/bin:/usr/bin:/bin"
 
 pidfile="/var/run/${name}.pid"
 command="${rad_bin}"
@@ -38,9 +34,6 @@ rad_start()
         HOME='${rad_home}' \
         USER='${rad_user}' \
         LOGNAME='${rad_user}' \
-        CARGO_HOME='${rad_cargo_home}' \
-        PATH='${rad_path}' \
-        RUSTUP_HOME='${rad_rustup_home}' \
         sh -c 'cd \"${rad_home}\" || exit 1; nohup \"${rad_bin}\" ${rad_args} >/dev/null 2>&1 & echo \$!'\
     " > "${pidfile}" || return 1
 }

@@ -6,7 +6,6 @@ After=default.target
 Type=simple
 WorkingDirectory=%h
 Environment=RUST_LOG=info
-Environment=PATH=%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.cargo/bin/rad server
 Restart=always
 RestartSec=2

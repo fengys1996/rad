@@ -6,9 +6,8 @@ Unit file:
 
 Quick setup:
 
-1. Replace these placeholders in `com.user.rad.plist` with absolute paths:
+1. Replace the placeholder in `com.user.rad.plist`:
    - `{path-to-rad}`: directory containing the `rad` binary.
-   - `{username}`: your macOS username, used in `/Users/{username}/.cargo/bin`.
 2. Copy the plist into `~/Library/LaunchAgents/`.
 3. Load and start the agent:
 
