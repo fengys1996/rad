@@ -87,11 +87,11 @@ async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
     let may_reader_exit = match read_task.await {
         Ok(Ok(reader_exit)) => Some(reader_exit),
         Ok(Err(e)) => {
-            warn!(cid, error = %e, "forward_client_to_instance task failed");
+            warn!(cid, error = ?e, "forward_client_to_instance task failed");
             None
         }
         Err(e) => {
-            warn!(cid, error = %e, "forward_client_to_instance task panicked");
+            warn!(cid, error = ?e, "forward_client_to_instance task panicked");
             None
         }
     };
@@ -108,7 +108,7 @@ async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
     }
 
     if let Err(e) = write_task.await {
-        warn!(cid, error = %e, "instance_to_client task failed");
+        warn!(cid, error = ?e, "instance_to_client task failed");
     }
 }
 
@@ -131,7 +131,7 @@ async fn forward_instance_to_client(
     }
 
     if let Err(e) = writer.shutdown().await {
-        warn!(err = %e, "failed to shutdown to_client channel");
+        warn!(err = ?e, "failed to shutdown to_client channel");
     }
 }
 
@@ -146,7 +146,7 @@ async fn forward_client_to_instance(
         let frame = match frame {
             Ok(frame) => frame,
             Err(e) => {
-                warn!(cid, error = %e, "failed to decode client frame");
+                warn!(cid, error = ?e, "failed to decode client frame");
                 break;
             }
         };
@@ -167,7 +167,7 @@ async fn forward_client_to_instance(
                     warn!(
                         cid,
                         workspace = handle.key().workspace(),
-                        error = %err,
+                        error = ?err,
                         "failed to send message to lsp instance"
                     );
                 }

@@ -61,19 +61,19 @@ async fn stdin_to_server(mut write: OwnedWriteHalf) {
             }
             Ok(n) => n,
             Err(e) => {
-                warn!(error = %e, "failed to read from stdin");
+                warn!(error = ?e, "failed to read from stdin");
                 break;
             }
         };
 
         if let Err(e) = write.write_all(&buf[..n]).await {
-            warn!(error = %e, "failed to write to rad server");
+            warn!(error = ?e, "failed to write to rad server");
             break;
         }
     }
 
     if let Err(e) = write.shutdown().await {
-        warn!(error = %e, "failed to shutdown write");
+        warn!(error = ?e, "failed to shutdown write");
     }
 }
 
@@ -89,18 +89,18 @@ async fn server_to_stdout(mut read: OwnedReadHalf) {
             }
             Ok(n) => n,
             Err(e) => {
-                warn!(error = %e, "failed to read from rad server");
+                warn!(error = ?e, "failed to read from rad server");
                 break;
             }
         };
 
         if let Err(e) = stdout.write_all(&buf[..n]).await {
-            warn!(error = %e, "failed to write to stdout");
+            warn!(error = ?e, "failed to write to stdout");
             break;
         }
 
         if let Err(e) = stdout.flush().await {
-            warn!(error = %e, "failed to flush stdout");
+            warn!(error = ?e, "failed to flush stdout");
             break;
         }
     }

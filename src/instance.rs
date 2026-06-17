@@ -380,7 +380,7 @@ impl Instance {
                 false
             }
             Err(err) => {
-                warn!(pid = self.pid, error = %err, "failed to check lsp instance process state");
+                warn!(pid = self.pid, error = ?err, "failed to check lsp instance process state");
                 false
             }
         }
@@ -393,11 +393,11 @@ impl Instance {
         let mut process = self.process.lock().await;
 
         if let Err(e) = process.kill().await {
-            error!("failed to kill rust-analyzer, pid {}, error: {e}", self.pid);
+            error!(pid = self.pid, error = ?e, "failed to kill rust-analyzer");
         }
 
         if let Err(e) = process.wait().await {
-            error!("failed to reap rust-analyzer, pid {}, error: {e}", self.pid);
+            error!(pid = self.pid, error = ?e, "failed to reap rust-analyzer");
         }
     }
 
@@ -486,7 +486,7 @@ async fn forward_client_to_ra(
     }
 
     if let Err(err) = ra_stdin.shutdown().await {
-        error!("failed to shutdown rust-analyzer pid {} stdin: {err}", pid);
+        error!(pid, error = ?err, "failed to shutdown rust-analyzer stdin");
     }
 }
 
@@ -513,13 +513,13 @@ async fn handle_client_msg_to_ra(
         {
             Ok(bytes) => bytes,
             Err(err) => {
-                warn!(pid, client_id = msg.client_id, error = %err, "failed to encode rewritten client frame, forwarding raw bytes");
+                warn!(pid, client_id = msg.client_id, error = ?err, "failed to encode rewritten client frame, forwarding raw bytes");
                 msg.bytes
             }
         },
         Ok(None) => msg.bytes,
         Err(err) => {
-            warn!(pid, client_id = msg.client_id, error = %err, "invalid client frame, forwarding raw bytes");
+            warn!(pid, client_id = msg.client_id, error = ?err, "invalid client frame, forwarding raw bytes");
             msg.bytes
         }
     };
@@ -533,8 +533,9 @@ async fn handle_client_msg_to_ra(
 
     if let Err(err) = ra_stdin.write_all(&rewritten).await {
         error!(
-            "failed to forward message to rust-analyzer pid {} stdin: {err}",
-            pid
+            pid,
+            error = ?err,
+            "failed to forward message to rust-analyzer stdin"
         );
         return true;
     }
@@ -573,7 +574,7 @@ async fn forward_ra_to_active_client(
                         let routed = match req_id_mapper.rewrite_ra_packet(frame, active, pid) {
                             Ok(routed) => routed,
                             Err(e) => {
-                                warn!(pid, error = %e, "failed to rewrite rust-analyzer frame, forwarding raw bytes");
+                                warn!(pid, error = ?e, "failed to rewrite rust-analyzer frame, forwarding raw bytes");
                                 continue;
                             },
                         };
@@ -587,10 +588,10 @@ async fn forward_ra_to_active_client(
                         if let Some(tx) = client_tx {
                             if let Err(err) = tx.send(routed.bytes).await {
                                 error!(
-                                    "failed to forward rust-analyzer pid {} output to client {}: {}",
                                     pid,
-                                    routed.client_id,
-                                    err
+                                    client_id = routed.client_id,
+                                    error = ?err,
+                                    "failed to forward rust-analyzer output to client"
                                 );
                             }
                         } else {
@@ -602,7 +603,7 @@ async fn forward_ra_to_active_client(
                         }
                     }
                     Some(Err(err)) => {
-                        error!(pid, error = %err, "failed to parse rust-analyzer packet");
+                        error!(pid, error = ?err, "failed to parse rust-analyzer packet");
                         break;
                     }
                     None => {
