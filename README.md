@@ -28,8 +28,18 @@ It also allows multiple editors opening the same workspace to reuse a single
 ## Features
 
 - Reuse existing rust-analyzer instance for the same workspace.
-- Keep rust-analyzer alive when clients disconnect; idle reaper shuts it down after 5 minutes.
+- Keep rust-analyzer alive when clients disconnect; idle reaper shuts it down after a configurable timeout.
 - Start rust-analyzer in the workspace directory to respect each project's Rust toolchain.
+
+## Configuration
+
+The default config path is `~/.config/rad/rad.toml`. Use `-c` / `--config-file`
+to override it.
+
+Run `rad --help` to see all config options and defaults.
+
+An example config file is provided at [`rad.toml`](rad.toml) in the repository
+root.
 
 ## How it work?
 
