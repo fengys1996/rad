@@ -4,7 +4,7 @@ instance_timeout = 300
 
 # Interval for background garbage collection (seconds).
 # Used to clean up expired or unused instances.
-gc_interval = 10
+gc_interval = 30
 
 # Addresses for the daemon to listen on.
 # Format: [host, port]

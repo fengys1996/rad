@@ -33,8 +33,6 @@ use crate::{
 };
 
 const INSTANCE_SEND_TIMEOUT_MS: u64 = 100;
-const REAPER_INTERVAL: Duration = Duration::from_secs(30);
-const IDLE_TIMEOUT_SECS: i64 = 5 * 60;
 
 #[derive(Clone)]
 pub struct InstanceManager {
@@ -44,9 +42,9 @@ pub struct InstanceManager {
 impl InstanceManager {
     /// Creates a new [`InstanceManager`] and starts the background idle-instance
     /// reaper task.
-    pub async fn new() -> Self {
+    pub async fn new(instance_timeout: Duration, gc_interval: Duration) -> Self {
         let instances = Arc::new(DashMap::new());
-        spawn_instance_reaper(instances.clone()).await;
+        spawn_instance_reaper(instances.clone(), instance_timeout, gc_interval).await;
         Self { instances }
     }
 
@@ -76,27 +74,36 @@ impl InstanceManager {
 
 /// Spawns the background task that reaps idle LSP instances.
 ///
-/// The task checks all instances every 30 seconds. An instance is reaped when
-/// it has no attached clients and has been idle for at least 5 minutes.
-async fn spawn_instance_reaper(instances: Arc<DashMap<InstanceKey, InstanceRef>>) {
+/// Checks all instances on the given interval. An instance is reaped when
+/// it has no attached clients and has been idle for at least the configured
+/// timeout.
+async fn spawn_instance_reaper(
+    instances: Arc<DashMap<InstanceKey, InstanceRef>>,
+    instance_timeout: Duration,
+    gc_interval: Duration,
+) {
     tokio::spawn(async move {
-        let mut ticker = time::interval(REAPER_INTERVAL);
+        let mut ticker = time::interval(gc_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let idle_timeout_secs = instance_timeout.as_secs() as i64;
         loop {
             ticker.tick().await;
-            reap_idle_instances(&instances).await;
+            reap_idle_instances(&instances, idle_timeout_secs).await;
         }
     });
 }
 
-async fn reap_idle_instances(instances: &DashMap<InstanceKey, InstanceRef>) {
+async fn reap_idle_instances(
+    instances: &DashMap<InstanceKey, InstanceRef>,
+    idle_timeout_secs: i64,
+) {
     let now = now_ts();
     let mut to_remove = Vec::new();
 
     for entry in instances.iter() {
         let instance = entry.value();
         let inactive_secs = now - instance.last_used.load(Ordering::Relaxed);
-        if instance.clients.is_empty() && inactive_secs >= IDLE_TIMEOUT_SECS {
+        if instance.clients.is_empty() && inactive_secs >= idle_timeout_secs {
             to_remove.push((entry.key().clone(), instance.clone(), inactive_secs));
         }
     }

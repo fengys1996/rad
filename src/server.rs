@@ -17,25 +17,22 @@ use tracing::{debug, info, warn};
 
 use crate::error::{IoSnafu, Result};
 use crate::{
-    config::DEFAULT_ADDR,
     instance::{InstanceHandle, InstanceKey, InstanceManager},
     protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
 };
 
 pub struct Options {
     pub server_addr: String,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            server_addr: DEFAULT_ADDR.to_string(),
-        }
-    }
+    pub instance_timeout: std::time::Duration,
+    pub gc_interval: std::time::Duration,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
-    let Options { server_addr } = opts;
+    let Options {
+        server_addr,
+        instance_timeout,
+        gc_interval,
+    } = opts;
 
     let listener = TcpListener::bind(&server_addr)
         .await
@@ -45,7 +42,7 @@ pub async fn run(opts: Options) -> Result<()> {
 
     info!(server_addr, "server listening");
 
-    let manager = InstanceManager::new().await;
+    let manager = InstanceManager::new(instance_timeout, gc_interval).await;
     let next_client_id = Arc::new(AtomicU32::new(1));
 
     loop {
