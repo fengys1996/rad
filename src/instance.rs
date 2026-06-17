@@ -1,5 +1,6 @@
 use std::{
-    path::PathBuf,
+    collections::HashMap,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::atomic::Ordering,
     sync::{
@@ -26,6 +27,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use crate::config::ProjectConfig;
 use crate::error::{PlainTextSnafu, Result};
 use crate::{
     mapper::ReqIdMapper,
@@ -37,15 +39,44 @@ const INSTANCE_SEND_TIMEOUT_MS: u64 = 100;
 #[derive(Clone)]
 pub struct InstanceManager {
     instances: Arc<DashMap<InstanceKey, InstanceRef>>,
+    default_lsp_server_path: Arc<String>,
+    project_overrides: Arc<HashMap<String, ProjectConfig>>,
 }
 
 impl InstanceManager {
-    /// Creates a new [`InstanceManager`] and starts the background idle-instance
-    /// reaper task.
-    pub async fn new(instance_timeout: Duration, gc_interval: Duration) -> Self {
+    pub async fn new(
+        instance_timeout: Duration,
+        gc_interval: Duration,
+        default_lsp_server_path: String,
+        project_overrides: HashMap<String, ProjectConfig>,
+    ) -> Self {
         let instances = Arc::new(DashMap::new());
         spawn_instance_reaper(instances.clone(), instance_timeout, gc_interval).await;
-        Self { instances }
+        Self {
+            instances,
+            default_lsp_server_path: Arc::new(default_lsp_server_path),
+            project_overrides: Arc::new(project_overrides),
+        }
+    }
+
+    fn resolve_lsp_server_path(&self, workspace_dir: Option<&Path>) -> &str {
+        let dir = match workspace_dir {
+            Some(d) => d,
+            None => return &self.default_lsp_server_path,
+        };
+        for (project_path, cfg) in self.project_overrides.iter() {
+            if let Some(ra_path) = &cfg.lsp_server_path {
+                let project_path = Path::new(project_path);
+                if dir == project_path
+                    || dir
+                        .canonicalize()
+                        .is_ok_and(|cd| project_path.canonicalize().is_ok_and(|cp| cd == cp))
+                {
+                    return ra_path;
+                }
+            }
+        }
+        &self.default_lsp_server_path
     }
 
     /// Detaches a client from the specified LSP instance.
@@ -147,7 +178,10 @@ impl InstanceManager {
                     );
                     stale.shutdown().await;
                 }
-                let instance = Arc::new(Instance::new(key.workspace_dir())?);
+                let instance = Arc::new(Instance::new(
+                    self.resolve_lsp_server_path(key.workspace_dir().as_deref()),
+                    key.workspace_dir(),
+                )?);
                 info!(
                     workspace = %key.workspace,
                     pid = instance.pid,
@@ -157,7 +191,10 @@ impl InstanceManager {
                 instance
             }
         } else {
-            let instance = Arc::new(Instance::new(key.workspace_dir())?);
+            let instance = Arc::new(Instance::new(
+                self.resolve_lsp_server_path(key.workspace_dir().as_deref()),
+                key.workspace_dir(),
+            )?);
             info!(
                 workspace = %key.workspace,
                 pid = instance.pid,
@@ -244,8 +281,8 @@ struct Instance {
 type InstanceRef = Arc<Instance>;
 
 impl Instance {
-    fn new(workspace_dir: Option<PathBuf>) -> Result<Instance> {
-        let mut command = Command::new("rust-analyzer");
+    fn new(lsp_server_path: &str, workspace_dir: Option<PathBuf>) -> Result<Instance> {
+        let mut command = Command::new(lsp_server_path);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -601,7 +638,7 @@ mod tests {
             );
         }
 
-        let instance = Instance::new(None).unwrap();
+        let instance = Instance::new("rust-analyzer", None).unwrap();
 
         instance.shutdown().await;
 

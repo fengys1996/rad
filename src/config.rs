@@ -1,11 +1,22 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:27631";
 
+#[derive(Clone, Deserialize)]
+pub struct ProjectConfig {
+    #[serde(default)]
+    pub lsp_server_path: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct RadConfig {
+    #[serde(default = "default_lsp_server_path")]
+    pub default_lsp_server_path: String,
+    #[serde(default)]
+    pub projects: HashMap<String, ProjectConfig>,
     #[serde(default = "default_instance_timeout")]
     pub instance_timeout: u64,
     #[serde(default = "default_gc_interval")]
@@ -17,6 +28,8 @@ pub struct RadConfig {
 impl Default for RadConfig {
     fn default() -> Self {
         Self {
+            default_lsp_server_path: default_lsp_server_path(),
+            projects: HashMap::new(),
             instance_timeout: default_instance_timeout(),
             gc_interval: default_gc_interval(),
             listen: default_listen(),
@@ -52,10 +65,14 @@ Options:
     println!(
         "
 Config file format (TOML):
-  instance_timeout = {}   # idle timeout in seconds before reaping a
-                         # rust-analyzer instance with no clients
-  gc_interval       = {}    # interval in seconds between reaper scans
-  listen            = [\"{}\", {}]  # daemon listen host and port",
+  default_lsp_server_path = \"{}\"  # default LSP server binary
+  instance_timeout        = {}   # idle timeout in seconds before reaping
+  gc_interval             = {}    # interval in seconds between reaper scans
+  listen                  = [\"{}\", {}]  # daemon listen host and port
+
+  [projects.\"/absolute/path\"]
+  lsp_server_path = \"/custom/rust-analyzer\"  # per-project override",
+        default_lsp_server_path(),
         default_instance_timeout(),
         default_gc_interval(),
         default_listen().0,
@@ -69,13 +86,19 @@ pub fn load_config(path: &PathBuf) -> RadConfig {
         Ok(contents) => match toml::from_str(&contents) {
             Ok(config) => config,
             Err(e) => {
-                eprintln!("failed to parse config file {}: {e}, using defaults", path.display());
+                eprintln!(
+                    "failed to parse config file {}: {e}, using defaults",
+                    path.display()
+                );
                 RadConfig::default()
             }
         },
         Err(e) => {
             if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("failed to read config file {}: {e}, using defaults", path.display());
+                eprintln!(
+                    "failed to read config file {}: {e}, using defaults",
+                    path.display()
+                );
             }
             RadConfig::default()
         }
@@ -138,6 +161,10 @@ fn default_config_path() -> PathBuf {
         return path;
     }
     PathBuf::from("rad.toml")
+}
+
+fn default_lsp_server_path() -> String {
+    "rust-analyzer".to_string()
 }
 
 fn default_instance_timeout() -> u64 {

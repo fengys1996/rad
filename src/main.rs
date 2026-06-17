@@ -1,5 +1,8 @@
 use crate::logging::{default_client_options, default_server_options, init_logging};
-use config::{Mode, load_config, parse_config_path, parse_mode, print_help_and_exit, print_help_and_exit_if_requested};
+use config::{
+    Mode, load_config, parse_config_path, parse_mode, print_help_and_exit,
+    print_help_and_exit_if_requested,
+};
 use std::time::Duration;
 
 pub mod client;
@@ -29,6 +32,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 server_addr: config.listen_addr(),
                 instance_timeout: Duration::from_secs(config.instance_timeout),
                 gc_interval: Duration::from_secs(config.gc_interval),
+                default_lsp_server_path: config.default_lsp_server_path,
+                project_overrides: config.projects,
             })
             .await?;
             guard

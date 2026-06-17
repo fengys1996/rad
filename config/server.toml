@@ -1,3 +1,6 @@
+# Default LSP server binary (name in PATH or absolute path).
+default_lsp_server_path = "rust-analyzer"
+
 # Idle timeout for each rust-analyzer instance (seconds).
 # Instances will be shut down if no client is attached within this period.
 instance_timeout = 300
@@ -9,3 +12,7 @@ gc_interval = 30
 # Addresses for the daemon to listen on.
 # Format: [host, port]
 listen = ["127.0.0.1", 27631]
+
+# Per-project LSP server overrides.
+# [projects."/absolute/path/to/project"]
+# lsp_server_path = "/custom/rust-analyzer"

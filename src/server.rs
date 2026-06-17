@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU32, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use snafu::ResultExt;
@@ -15,6 +18,7 @@ use tokio::{
 use tokio_stream::StreamExt;
 use tracing::{debug, info, warn};
 
+use crate::config::ProjectConfig;
 use crate::error::{IoSnafu, Result};
 use crate::{
     instance::{InstanceHandle, InstanceKey, InstanceManager},
@@ -25,6 +29,8 @@ pub struct Options {
     pub server_addr: String,
     pub instance_timeout: std::time::Duration,
     pub gc_interval: std::time::Duration,
+    pub default_lsp_server_path: String,
+    pub project_overrides: HashMap<String, ProjectConfig>,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -32,6 +38,8 @@ pub async fn run(opts: Options) -> Result<()> {
         server_addr,
         instance_timeout,
         gc_interval,
+        default_lsp_server_path,
+        project_overrides,
     } = opts;
 
     let listener = TcpListener::bind(&server_addr)
@@ -42,7 +50,13 @@ pub async fn run(opts: Options) -> Result<()> {
 
     info!(server_addr, "server listening");
 
-    let manager = InstanceManager::new(instance_timeout, gc_interval).await;
+    let manager = InstanceManager::new(
+        instance_timeout,
+        gc_interval,
+        default_lsp_server_path,
+        project_overrides,
+    )
+    .await;
     let next_client_id = Arc::new(AtomicU32::new(1));
 
     loop {
