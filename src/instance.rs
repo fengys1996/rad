@@ -178,26 +178,24 @@ impl InstanceManager {
                     );
                     stale.shutdown().await;
                 }
-                let instance = Arc::new(Instance::new(
-                    self.resolve_lsp_server_path(key.workspace_dir().as_deref()),
-                    key.workspace_dir(),
-                )?);
+                let lsp_server_path = self.resolve_lsp_server_path(key.workspace_dir().as_deref());
+                let instance = Arc::new(Instance::new(lsp_server_path, key.workspace_dir())?);
                 info!(
                     workspace = %key.workspace,
                     pid = instance.pid,
+                    lsp_server_path,
                     "spawned new lsp instance"
                 );
                 self.instances.insert(key.clone(), instance.clone());
                 instance
             }
         } else {
-            let instance = Arc::new(Instance::new(
-                self.resolve_lsp_server_path(key.workspace_dir().as_deref()),
-                key.workspace_dir(),
-            )?);
+            let lsp_server_path = self.resolve_lsp_server_path(key.workspace_dir().as_deref());
+            let instance = Arc::new(Instance::new(lsp_server_path, key.workspace_dir())?);
             info!(
                 workspace = %key.workspace,
                 pid = instance.pid,
+                lsp_server_path,
                 "spawned new lsp instance"
             );
             self.instances.insert(key.clone(), instance.clone());
