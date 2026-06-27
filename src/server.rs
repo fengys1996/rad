@@ -48,7 +48,7 @@ pub async fn run(opts: Options) -> Result<()> {
     let listener = TcpListener::bind(&server_addr)
         .await
         .with_context(|_| IoSnafu {
-            reason: format!("failed to bind, server addr: {}", server_addr),
+            detail: format!("failed to bind, server addr: {}", server_addr),
         })?;
 
     info!(server_addr, "server listening");

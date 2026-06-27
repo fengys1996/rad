@@ -14,7 +14,7 @@ use std::{
 use bytes::BytesMut;
 use dashmap::DashMap;
 use serde_json::Value;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use tokio::{
     io::AsyncWriteExt,
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -28,8 +28,8 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::config::ProjectConfig;
 use crate::error::{PlainTextSnafu, Result};
+use crate::{config::ProjectConfig, error::IoSnafu};
 use crate::{
     mapper::ReqIdMapper,
     protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
@@ -331,7 +331,9 @@ impl Instance {
         if let Some(dir) = workspace_dir {
             command.current_dir(dir);
         }
-        let mut process = command.spawn()?;
+        let mut process = command.spawn().with_context(|_| IoSnafu {
+            detail: format!("lsp_server_path: {}", lsp_server_path.display()),
+        })?;
 
         let pid = process.id().context(PlainTextSnafu {
             msg: "failed to read lsp instance id, since lsp instance may have already shut down",

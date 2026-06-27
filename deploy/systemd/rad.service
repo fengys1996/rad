@@ -10,7 +10,6 @@ ExecStart=%h/.cargo/bin/rad server
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
-PrivateTmp=true
 
 [Install]
 WantedBy=default.target

@@ -19,7 +19,7 @@ pub fn init_logging(opts: LoggingOptions) -> Result<WorkerGuard> {
 
     if let Some(parent) = file_path.parent() {
         create_dir_all(parent).with_context(|_| IoSnafu {
-            reason: format!("failed to create log directory {parent:?}"),
+            detail: format!("failed to create log directory {parent:?}"),
         })?;
     }
 
@@ -28,7 +28,7 @@ pub fn init_logging(opts: LoggingOptions) -> Result<WorkerGuard> {
         .append(true)
         .open(&file_path)
         .with_context(|_| IoSnafu {
-            reason: format!("failed to open log file {file_path:?}"),
+            detail: format!("failed to open log file {file_path:?}"),
         })?;
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| level.into());

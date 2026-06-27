@@ -18,10 +18,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("io error, {}", reason))]
+    #[snafu(display("io error, {}", detail))]
     Io {
         source: std::io::Error,
-        reason: String,
+        detail: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -57,10 +57,11 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl From<std::io::Error> for Error {
+    #[track_caller]
     fn from(source: std::io::Error) -> Self {
         Self::Io {
             source,
-            reason: "".to_string(),
+            detail: "empty".to_string(),
             location: location!(),
         }
     }
