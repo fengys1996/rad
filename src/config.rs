@@ -8,13 +8,15 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:27631";
 #[derive(Clone, Deserialize)]
 pub struct ProjectConfig {
     #[serde(default)]
-    pub lsp_server_path: Option<String>,
+    pub lsp_server_path: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
 pub struct RadConfig {
-    #[serde(default = "default_lsp_server_path")]
-    pub default_lsp_server_path: String,
+    #[serde(default)]
+    pub lsp_server_path: Option<PathBuf>,
+    #[serde(default)]
+    pub cargo_path: Option<PathBuf>,
     #[serde(default)]
     pub projects: HashMap<String, ProjectConfig>,
     #[serde(default = "default_instance_timeout")]
@@ -28,7 +30,8 @@ pub struct RadConfig {
 impl Default for RadConfig {
     fn default() -> Self {
         Self {
-            default_lsp_server_path: default_lsp_server_path(),
+            lsp_server_path: None,
+            cargo_path: None,
             projects: HashMap::new(),
             instance_timeout: default_instance_timeout(),
             gc_interval: default_gc_interval(),
@@ -65,14 +68,14 @@ Options:
     println!(
         "
 Config file format (TOML):
-  default_lsp_server_path = \"{}\"  # default LSP server binary
+  lsp_server_path         = \"/path/to/rust-analyzer\"  # optional LSP server path
+  cargo_path              = \"/path/to/cargo\"  # optional cargo binary path
   instance_timeout        = {}   # idle timeout in seconds before reaping
   gc_interval             = {}    # interval in seconds between reaper scans
   listen                  = [\"{}\", {}]  # daemon listen host and port
 
   [projects.\"/absolute/path\"]
   lsp_server_path = \"/custom/rust-analyzer\"  # per-project override",
-        default_lsp_server_path(),
         default_instance_timeout(),
         default_gc_interval(),
         default_listen().0,
@@ -161,10 +164,6 @@ fn default_config_path() -> PathBuf {
         return path;
     }
     PathBuf::from("rad.toml")
-}
-
-fn default_lsp_server_path() -> String {
-    "rust-analyzer".to_string()
 }
 
 fn default_instance_timeout() -> u64 {

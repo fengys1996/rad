@@ -32,7 +32,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 server_addr: config.listen_addr(),
                 instance_timeout: Duration::from_secs(config.instance_timeout),
                 gc_interval: Duration::from_secs(config.gc_interval),
-                default_lsp_server_path: config.default_lsp_server_path,
+                lsp_server_path: config.lsp_server_path,
+                cargo_path: config.cargo_path,
                 project_overrides: config.projects,
             })
             .await?;

@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -29,7 +30,8 @@ pub struct Options {
     pub server_addr: String,
     pub instance_timeout: std::time::Duration,
     pub gc_interval: std::time::Duration,
-    pub default_lsp_server_path: String,
+    pub lsp_server_path: Option<PathBuf>,
+    pub cargo_path: Option<PathBuf>,
     pub project_overrides: HashMap<String, ProjectConfig>,
 }
 
@@ -38,7 +40,8 @@ pub async fn run(opts: Options) -> Result<()> {
         server_addr,
         instance_timeout,
         gc_interval,
-        default_lsp_server_path,
+        lsp_server_path,
+        cargo_path,
         project_overrides,
     } = opts;
 
@@ -53,10 +56,11 @@ pub async fn run(opts: Options) -> Result<()> {
     let manager = InstanceManager::new(
         instance_timeout,
         gc_interval,
-        default_lsp_server_path,
+        lsp_server_path,
+        cargo_path,
         project_overrides,
     )
-    .await;
+    .await?;
     let next_client_id = Arc::new(AtomicU32::new(1));
 
     loop {

@@ -1,18 +1,54 @@
-# Default LSP server binary (name in PATH or absolute path).
-default_lsp_server_path = "rust-analyzer"
+# LSP server path(Optional).
+#
+# If this is not set, rad will look for `rust-analyzer` in PATH. If set, this
+# should be an absolute path.
+#
+# This is useful when rad is started by systemd without a fully configured
+# PATH.
+#
+# For example:
+# lsp_server_path = "/path/to/rust-analyzer"
 
-# Idle timeout for each rust-analyzer instance (seconds).
-# Instances will be shut down if no client is attached within this period.
-instance_timeout = 300
+# Cargo binary path(Optional).
+#
+# If this is not set, rust-analyzer will look for `cargo` in PATH. If set, this
+# should be an absolute path.
+#
+# This is useful when rad is started by systemd without a fully configured
+# PATH and rust-analyzer cannot find `cargo` when it runs flycheck.
+#
+# For example:
+# cargo_path = "/path/to/cargo"
 
-# Interval for background garbage collection (seconds).
-# Used to clean up expired or unused instances.
-gc_interval = 30
+# Instance idle timeout in seconds(Optional).
+#
+# If this is not set, rad will use 300 seconds. Instances will be shut down if
+# no client is attached within this period.
+#
+# For example:
+# instance_timeout = 300
 
-# Addresses for the daemon to listen on.
-# Format: [host, port]
-listen = ["127.0.0.1", 27631]
+# Background garbage collection interval in seconds(Optional).
+#
+# If this is not set, rad will use 30 seconds. This is used to clean up expired
+# or unused instances.
+#
+# For example:
+# gc_interval = 30
 
-# Per-project LSP server overrides.
+# Address for the daemon to listen on(Optional).
+#
+# If this is not set, rad will listen on 127.0.0.1:27631. The format is
+# [host, port].
+#
+# For example:
+# listen = ["127.0.0.1", 27631]
+
+# Per-project LSP server path overrides(Optional).
+#
+# If this is not set, each project will use the global lsp_server_path setting.
+# If set, lsp_server_path should be an absolute path.
+#
+# For example:
 # [projects."/absolute/path/to/project"]
 # lsp_server_path = "/custom/rust-analyzer"

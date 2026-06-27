@@ -1,11 +1,12 @@
 use std::{
     collections::HashMap,
+    env::{join_paths, split_paths},
+    iter::once,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::atomic::Ordering,
     sync::{
         Arc,
-        atomic::{AtomicI64, AtomicU32},
+        atomic::{AtomicI64, AtomicU32, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -39,7 +40,8 @@ const INSTANCE_SEND_TIMEOUT_MS: u64 = 100;
 #[derive(Clone)]
 pub struct InstanceManager {
     instances: Arc<DashMap<InstanceKey, InstanceRef>>,
-    default_lsp_server_path: Arc<String>,
+    lsp_server_path: Arc<PathBuf>,
+    cargo_path: Arc<Option<PathBuf>>,
     project_overrides: Arc<HashMap<String, ProjectConfig>>,
 }
 
@@ -47,22 +49,37 @@ impl InstanceManager {
     pub async fn new(
         instance_timeout: Duration,
         gc_interval: Duration,
-        default_lsp_server_path: String,
+        lsp_server_path: Option<PathBuf>,
+        cargo_path: Option<PathBuf>,
         project_overrides: HashMap<String, ProjectConfig>,
-    ) -> Self {
+    ) -> Result<Self> {
+        if let Some(path) = &lsp_server_path {
+            ensure_absolute_path("lsp_server_path", path)?;
+        }
+        if let Some(path) = &cargo_path {
+            ensure_absolute_path("cargo_path", path)?;
+        }
+        for (project_path, cfg) in project_overrides.iter() {
+            if let Some(path) = &cfg.lsp_server_path {
+                ensure_absolute_path(&format!("projects.{project_path}.lsp_server_path"), path)?;
+            }
+        }
+
         let instances = Arc::new(DashMap::new());
         spawn_instance_reaper(instances.clone(), instance_timeout, gc_interval).await;
-        Self {
+        let lsp_server_path = lsp_server_path.unwrap_or_else(|| PathBuf::from("rust-analyzer"));
+        Ok(Self {
             instances,
-            default_lsp_server_path: Arc::new(default_lsp_server_path),
+            lsp_server_path: Arc::new(lsp_server_path),
+            cargo_path: Arc::new(cargo_path),
             project_overrides: Arc::new(project_overrides),
-        }
+        })
     }
 
-    fn resolve_lsp_server_path(&self, workspace_dir: Option<&Path>) -> &str {
+    fn resolve_lsp_server_path(&self, workspace_dir: Option<&Path>) -> &Path {
         let dir = match workspace_dir {
             Some(d) => d,
-            None => return &self.default_lsp_server_path,
+            None => return &self.lsp_server_path,
         };
         for (project_path, cfg) in self.project_overrides.iter() {
             if let Some(ra_path) = &cfg.lsp_server_path {
@@ -76,7 +93,7 @@ impl InstanceManager {
                 }
             }
         }
-        &self.default_lsp_server_path
+        &self.lsp_server_path
     }
 
     /// Detaches a client from the specified LSP instance.
@@ -101,6 +118,17 @@ impl InstanceManager {
             "detach client from lsp instance"
         );
     }
+}
+
+fn ensure_absolute_path(name: &str, path: &Path) -> Result<()> {
+    if path.is_absolute() {
+        return Ok(());
+    }
+
+    PlainTextSnafu {
+        msg: format!("{name} must be an absolute path, got {}", path.display()),
+    }
+    .fail()
 }
 
 /// Spawns the background task that reaps idle LSP instances.
@@ -179,11 +207,15 @@ impl InstanceManager {
                     stale.shutdown().await;
                 }
                 let lsp_server_path = self.resolve_lsp_server_path(key.workspace_dir().as_deref());
-                let instance = Arc::new(Instance::new(lsp_server_path, key.workspace_dir())?);
+                let instance = Arc::new(Instance::new(
+                    lsp_server_path,
+                    self.cargo_path.as_deref(),
+                    key.workspace_dir(),
+                )?);
                 info!(
                     workspace = %key.workspace,
                     pid = instance.pid,
-                    lsp_server_path,
+                    lsp_server_path = %lsp_server_path.display(),
                     "spawned new lsp instance"
                 );
                 self.instances.insert(key.clone(), instance.clone());
@@ -191,11 +223,15 @@ impl InstanceManager {
             }
         } else {
             let lsp_server_path = self.resolve_lsp_server_path(key.workspace_dir().as_deref());
-            let instance = Arc::new(Instance::new(lsp_server_path, key.workspace_dir())?);
+            let instance = Arc::new(Instance::new(
+                lsp_server_path,
+                self.cargo_path.as_deref(),
+                key.workspace_dir(),
+            )?);
             info!(
                 workspace = %key.workspace,
                 pid = instance.pid,
-                lsp_server_path,
+                lsp_server_path = %lsp_server_path.display(),
                 "spawned new lsp instance"
             );
             self.instances.insert(key.clone(), instance.clone());
@@ -279,12 +315,19 @@ struct Instance {
 type InstanceRef = Arc<Instance>;
 
 impl Instance {
-    fn new(lsp_server_path: &str, workspace_dir: Option<PathBuf>) -> Result<Instance> {
+    fn new(
+        lsp_server_path: &Path,
+        cargo_path: Option<&Path>,
+        workspace_dir: Option<PathBuf>,
+    ) -> Result<Instance> {
         let mut command = Command::new(lsp_server_path);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        if let Some(path) = cargo_path {
+            prepend_cargo_dir_to_path(&mut command, path)?;
+        }
         if let Some(dir) = workspace_dir {
             command.current_dir(dir);
         }
@@ -403,6 +446,34 @@ impl Instance {
         self.req_id_mapper
             .initialize_response_from_cache(request_id)
     }
+}
+
+fn prepend_cargo_dir_to_path(command: &mut Command, cargo_path: &Path) -> Result<()> {
+    let cargo_dir = cargo_path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty());
+
+    let Some(cargo_dir) = cargo_dir else {
+        return PlainTextSnafu {
+            msg: format!(
+                "cargo_path must include a parent directory, got {:?}",
+                cargo_path
+            ),
+        }
+        .fail();
+    };
+
+    let curr_path = std::env::var_os("PATH").unwrap_or_default();
+    let paths = once(cargo_dir.to_path_buf()).chain(split_paths(&curr_path));
+    let path = join_paths(paths).map_err(|err| {
+        PlainTextSnafu {
+            msg: format!("failed to build PATH with cargo_path: {err}"),
+        }
+        .build()
+    })?;
+
+    command.env("PATH", path);
+    Ok(())
 }
 
 struct ClientMessage {
@@ -637,7 +708,7 @@ mod tests {
             );
         }
 
-        let instance = Instance::new("rust-analyzer", None).unwrap();
+        let instance = Instance::new(Path::new("rust-analyzer"), None, None).unwrap();
 
         instance.shutdown().await;
 
