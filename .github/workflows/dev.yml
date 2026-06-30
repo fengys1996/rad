@@ -9,8 +9,8 @@ on:
       - main
 
 jobs:
-  ci:
-    name: Rust CI
+  cargo:
+    name: Cargo
     runs-on: ubuntu-latest
 
     steps:
@@ -20,6 +20,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.96"
           components: clippy,rustfmt
 
       - name: Check
@@ -31,11 +32,37 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+  taplo:
+    name: Taplo
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96"
+
       - name: Install taplo
         run: cargo install taplo-cli --locked
 
       - name: Check TOML formatting
         run: taplo fmt --check
+
+  typos:
+    name: Typos
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96"
 
       - name: Install typos
         run: cargo install typos-cli --locked
