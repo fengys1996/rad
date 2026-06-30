@@ -21,7 +21,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96"
-          components: clippy,rustfmt
+          components: clippy,rustfmt,rust-analyzer
 
       - name: Check
         run: cargo check --locked

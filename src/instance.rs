@@ -705,9 +705,10 @@ mod tests {
         init_tracing();
 
         if !ra_available() {
-            panic!(
+            eprintln!(
                 "skipping shutdown_exits_rust_analyzer_process: rust-analyzer not available in PATH"
             );
+            return;
         }
 
         let instance = Instance::new(Path::new("rust-analyzer"), None, None).unwrap();
