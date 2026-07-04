@@ -20,7 +20,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96"
+          toolchain: "1.96.1"
           components: clippy,rustfmt,rust-analyzer
 
       - name: Check
@@ -43,7 +43,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96"
+          toolchain: "1.96.1"
 
       - name: Install taplo
         run: cargo install taplo-cli --locked
@@ -62,7 +62,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96"
+          toolchain: "1.96.1"
 
       - name: Install typos
         run: cargo install typos-cli --locked
