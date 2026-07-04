@@ -1,8 +1,5 @@
 use crate::logging::{default_client_options, default_server_options, init_logging};
-use config::{
-    Mode, load_config, parse_config_path, parse_mode, print_help_and_exit,
-    print_help_and_exit_if_requested,
-};
+use config::{Mode, load_config, parse_args, print_help_and_exit};
 use std::time::Duration;
 
 pub mod client;
@@ -16,14 +13,12 @@ pub mod server;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    print_help_and_exit_if_requested();
-
-    let Some(mode) = parse_mode() else {
+    let args = parse_args();
+    let Some(mode) = args.mode else {
         print_help_and_exit();
     };
 
-    let config_path = parse_config_path();
-    let config = load_config(&config_path);
+    let config = load_config(&args.config_path);
 
     let _logging_guard = match mode {
         Mode::Server => {

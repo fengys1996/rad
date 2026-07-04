@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use clap::{Arg, ArgMatches, Command};
 use serde::Deserialize;
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:27631";
@@ -46,42 +47,19 @@ impl RadConfig {
     }
 }
 
-pub fn print_help_and_exit_if_requested() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "-h" || a == "--help") {
-        print_help_and_exit();
-    }
+pub struct Args {
+    pub mode: Option<Mode>,
+    pub config_path: PathBuf,
+}
+
+pub fn parse_args() -> Args {
+    parse_args_from(std::env::args())
 }
 
 pub fn print_help_and_exit() -> ! {
-    println!(
-        "rad - rust-analyzer daemon
-
-Usage:
-  rad [server|client] [options]
-
-Options:
-  -h, --help                    Print this help message
-  -c, --config-file <path>      Path to config file (default: {})",
-        default_config_path().display()
-    );
-    println!(
-        "
-Config file format (TOML):
-  lsp_server_path         = \"/path/to/rust-analyzer\"  # optional LSP server path
-  cargo_path              = \"/path/to/cargo\"  # optional cargo binary path
-  instance_timeout        = {}   # idle timeout in seconds before reaping
-  gc_interval             = {}    # interval in seconds between reaper scans
-  listen                  = [\"{}\", {}]  # daemon listen host and port
-
-  [projects.\"/absolute/path\"]
-  lsp_server_path = \"/custom/rust-analyzer\"  # per-project override",
-        default_instance_timeout(),
-        default_gc_interval(),
-        default_listen().0,
-        default_listen().1,
-    );
-    std::process::exit(0);
+    let _ = command().print_help();
+    println!();
+    std::process::exit(0)
 }
 
 pub fn load_config(path: &PathBuf) -> RadConfig {
@@ -108,45 +86,77 @@ pub fn load_config(path: &PathBuf) -> RadConfig {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum Mode {
     Server,
     Client,
 }
 
-pub fn parse_mode() -> Option<Mode> {
-    let mut args = std::env::args().skip(1);
-
-    loop {
-        match args.next().as_deref() {
-            Some("-c") | Some("--config-file") => {
-                args.next();
-            }
-            None => return None,
-            Some("server") => return Some(Mode::Server),
-            Some("client") => return Some(Mode::Client),
-            Some(_) => return None,
-        }
+fn parse_args_from<I, T>(args: I) -> Args
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let matches = command().get_matches_from(args);
+    Args {
+        mode: parse_mode(&matches),
+        config_path: parse_config_path(&matches),
     }
 }
 
-pub fn parse_config_path() -> PathBuf {
-    let mut args = std::env::args().skip(1);
+fn command() -> Command {
+    Command::new("rad")
+        .about("rust-analyzer daemon")
+        .disable_help_subcommand(true)
+        .override_usage("rad [server|client] [options]")
+        .after_help(config_help())
+        .arg(
+            Arg::new("config-file")
+                .short('c')
+                .long("config-file")
+                .value_name("path")
+                .help(format!(
+                    "Path to config file (default: {})",
+                    default_config_path().display()
+                ))
+                .global(true),
+        )
+        .subcommand(Command::new("server").about("Run the daemon server"))
+        .subcommand(Command::new("client").about("Run a daemon client"))
+}
 
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-c" | "--config-file" => {
-                if let Some(path) = args.next() {
-                    return PathBuf::from(path);
-                }
-                eprintln!("--config-file requires a path argument, using default config path");
-                break;
-            }
-            "server" | "client" => {}
-            _ => {}
-        }
+fn config_help() -> String {
+    format!(
+        "
+Config file format (TOML):
+  lsp_server_path         = \"/path/to/rust-analyzer\"  # optional LSP server path
+  cargo_path              = \"/path/to/cargo\"  # optional cargo binary path
+  instance_timeout        = {}   # idle timeout in seconds before reaping
+  gc_interval             = {}    # interval in seconds between reaper scans
+  listen                  = [\"{}\", {}]  # daemon listen host and port
+
+  [projects.\"/absolute/path\"]
+  lsp_server_path = \"/custom/rust-analyzer\"  # per-project override",
+        default_instance_timeout(),
+        default_gc_interval(),
+        default_listen().0,
+        default_listen().1,
+    )
+}
+
+fn parse_mode(matches: &ArgMatches) -> Option<Mode> {
+    match matches.subcommand_name() {
+        Some("server") => Some(Mode::Server),
+        Some("client") => Some(Mode::Client),
+        _ => None,
     }
+}
 
-    default_config_path()
+fn parse_config_path(matches: &ArgMatches) -> PathBuf {
+    matches
+        .get_one::<String>("config-file")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_config_path)
 }
 
 fn default_config_path() -> PathBuf {
@@ -176,4 +186,39 @@ fn default_gc_interval() -> u64 {
 
 fn default_listen() -> (String, u16) {
     ("127.0.0.1".to_string(), 27631)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_server_mode() {
+        let args = parse_args_from(["rad", "server"]);
+
+        assert_eq!(Some(Mode::Server), args.mode);
+    }
+
+    #[test]
+    fn parses_client_mode() {
+        let args = parse_args_from(["rad", "client"]);
+
+        assert_eq!(Some(Mode::Client), args.mode);
+    }
+
+    #[test]
+    fn parses_config_file_before_mode() {
+        let args = parse_args_from(["rad", "--config-file", "/tmp/rad.toml", "server"]);
+
+        assert_eq!(Some(Mode::Server), args.mode);
+        assert_eq!(PathBuf::from("/tmp/rad.toml"), args.config_path);
+    }
+
+    #[test]
+    fn parses_config_file_after_mode() {
+        let args = parse_args_from(["rad", "server", "-c", "/tmp/rad.toml"]);
+
+        assert_eq!(Some(Mode::Server), args.mode);
+        assert_eq!(PathBuf::from("/tmp/rad.toml"), args.config_path);
+    }
 }
