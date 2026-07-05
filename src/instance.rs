@@ -32,7 +32,7 @@ use crate::error::{PlainTextSnafu, Result};
 use crate::{config::ProjectConfig, error::IoSnafu};
 use crate::{
     mapper::ReqIdMapper,
-    protocol::{InstanceStatus, LspFrame, LspFrameDecoder, LspFrameStream},
+    protocol::{InstanceStatus, LspFrame, LspFrameDecoder, LspFrameStream, LspSender},
 };
 
 const INSTANCE_SEND_TIMEOUT_MS: u64 = 100;
@@ -184,7 +184,7 @@ impl InstanceManager {
     pub async fn spawn_instance(
         &self,
         client_id: u32,
-        to_client: Sender<LspFrame>,
+        to_client: LspSender,
         key: &InstanceKey,
     ) -> Result<(InstanceHandle, bool)> {
         let mut reused = false;
@@ -500,7 +500,7 @@ struct ClientMessage {
 #[derive(Clone)]
 struct ClientHandle {
     pub id: u32,
-    pub tx: Sender<LspFrame>,
+    pub tx: LspSender,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]

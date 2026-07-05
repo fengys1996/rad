@@ -24,7 +24,8 @@ use crate::error::{IoSnafu, Result};
 use crate::{
     instance::{InstanceHandle, InstanceKey, InstanceManager},
     protocol::{
-        ControlMessage, LspFrame, RadFrameCocdec, RadFrameStream, RadMessage, ServerStatus,
+        ControlMessage, LspFrame, LspSender, RadFrameCocdec, RadFrameStream, RadMessage,
+        ServerStatus,
     },
 };
 
@@ -82,14 +83,13 @@ pub async fn run(opts: Options) -> Result<()> {
 
 async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
     let (to_writer, from_writer) = channel::<RadMessage>(4);
-    let (to_client, from_client) = channel::<LspFrame>(4);
     let (r, w) = stream.into_split();
 
     let write_task = tokio::spawn(forward_to_client(cid, w, from_writer));
-    let lsp_adapter_task = tokio::spawn(forward_lsp_to_writer(cid, from_client, to_writer.clone()));
 
     let m = manager.clone();
     let frame_stream = RadFrameStream::new(r, RadFrameCocdec);
+    let to_client = LspSender::new(to_writer.clone());
     let read_task = tokio::spawn(forward_client_to_instance(
         m,
         cid,
@@ -121,10 +121,6 @@ async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
         );
     }
 
-    if let Err(e) = lsp_adapter_task.await {
-        warn!(cid, error = ?e, "lsp_to_writer task failed");
-    }
-
     if let Err(e) = write_task.await {
         warn!(cid, error = ?e, "instance_to_client task failed");
     }
@@ -147,24 +143,11 @@ async fn forward_to_client(
     }
 }
 
-async fn forward_lsp_to_writer(
-    client_id: u32,
-    mut from_lsp: Receiver<LspFrame>,
-    to_writer: Sender<RadMessage>,
-) {
-    while let Some(frame) = from_lsp.recv().await {
-        if let Err(e) = to_writer.send(RadMessage::lsp(frame)).await {
-            warn!(client_id, error = ?e, "failed to forward lsp frame to client writer");
-            break;
-        }
-    }
-}
-
 async fn forward_client_to_instance(
     manager: InstanceManager,
     cid: u32,
     mut input_stream: RadFrameStream<OwnedReadHalf>,
-    to_client_lsp: Sender<LspFrame>,
+    to_client: LspSender,
     to_writer: Sender<RadMessage>,
 ) -> Result<ReaderExit> {
     let mut session = ClientSessionState::default();
@@ -201,7 +184,7 @@ async fn forward_client_to_instance(
         };
 
         let action =
-            make_client_packet_plan(&manager, cid, &to_client_lsp, &mut session, frame).await?;
+            make_client_packet_plan(&manager, cid, &to_client, &mut session, frame).await?;
 
         match action {
             ClientPacketAction::ForwardToInstance { handle, bytes } => {
@@ -239,7 +222,7 @@ async fn forward_client_to_instance(
 async fn make_client_packet_plan(
     manager: &InstanceManager,
     cid: u32,
-    to_client: &Sender<LspFrame>,
+    to_client: &LspSender,
     session: &mut ClientSessionState,
     packet: LspFrame,
 ) -> Result<ClientPacketAction> {
