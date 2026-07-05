@@ -1,13 +1,13 @@
 use bytes::{Buf, BytesMut};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
-use tokio_util::codec::{Decoder, FramedRead};
+use tokio_util::codec::{Decoder, Encoder, FramedRead};
 
 use crate::error::{Error, InvalidJsonSnafu, PlainTextSnafu, Result};
 
 use super::lsp::LspFrame;
 
-pub type RadFrameStream<R> = FramedRead<R, RadFrameDecoder>;
+pub type RadFrameStream<R> = FramedRead<R, RadFrameCocdec>;
 
 const HEADER_LEN: usize = 5;
 const KIND_LSP: u8 = 1;
@@ -15,9 +15,39 @@ const KIND_CONTROL: u8 = 2;
 const MAX_BODY_LEN: usize = 64 * 1024 * 1024;
 
 #[derive(Default, Debug)]
-pub struct RadFrameDecoder;
+pub struct RadFrameCocdec;
 
-impl Decoder for RadFrameDecoder {
+impl Encoder<RadMessage> for RadFrameCocdec {
+    type Error = Error;
+
+    fn encode(&mut self, item: RadMessage, dst: &mut BytesMut) -> Result<()> {
+        let (kind, body) = match item {
+            RadMessage::Lsp(frame) => {
+                let body = serde_json::to_vec(&frame.body).context(InvalidJsonSnafu)?;
+                (KIND_LSP, body)
+            }
+            RadMessage::Control(message) => {
+                let body = serde_json::to_vec(&message).context(InvalidJsonSnafu)?;
+                (KIND_CONTROL, body)
+            }
+        };
+
+        if body.len() > MAX_BODY_LEN {
+            return PlainTextSnafu {
+                msg: format!("rad message body too large: {}", body.len()),
+            }
+            .fail();
+        }
+
+        dst.reserve(HEADER_LEN + body.len());
+        dst.extend_from_slice(&[kind]);
+        dst.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        dst.extend_from_slice(&body);
+        Ok(())
+    }
+}
+
+impl Decoder for RadFrameCocdec {
     type Item = RadMessage;
     type Error = Error;
 
@@ -26,7 +56,7 @@ impl Decoder for RadFrameDecoder {
     }
 }
 
-impl RadFrameDecoder {
+impl RadFrameCocdec {
     pub fn decode_packet(&mut self, src: &mut BytesMut) -> Result<Option<RadMessage>> {
         if src.len() < HEADER_LEN {
             return Ok(None);
@@ -82,29 +112,9 @@ impl RadMessage {
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let (kind, body) = match self {
-            RadMessage::Lsp(frame) => {
-                let body = serde_json::to_vec(&frame.body).context(InvalidJsonSnafu)?;
-                (KIND_LSP, body)
-            }
-            RadMessage::Control(message) => {
-                let body = serde_json::to_vec(message).context(InvalidJsonSnafu)?;
-                (KIND_CONTROL, body)
-            }
-        };
-
-        if body.len() > u32::MAX as usize {
-            return PlainTextSnafu {
-                msg: format!("rad message body too large: {}", body.len()),
-            }
-            .fail();
-        }
-
-        let mut bytes = Vec::with_capacity(HEADER_LEN + body.len());
-        bytes.push(kind);
-        bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(&body);
-        Ok(bytes)
+        let mut bytes = BytesMut::new();
+        RadFrameCocdec.encode(self.clone(), &mut bytes)?;
+        Ok(bytes.to_vec())
     }
 }
 
@@ -141,7 +151,7 @@ mod tests {
             "method": "test"
         })));
         let bytes = message.to_bytes().unwrap();
-        let decoded = RadFrameDecoder
+        let decoded = RadFrameCocdec
             .decode_packet(&mut BytesMut::from(bytes.as_slice()))
             .unwrap()
             .expect("message should decode");
@@ -153,7 +163,7 @@ mod tests {
     fn round_trips_control_message() {
         let message = RadMessage::control(ControlMessage::StatusRequest);
         let bytes = message.to_bytes().unwrap();
-        let decoded = RadFrameDecoder
+        let decoded = RadFrameCocdec
             .decode_packet(&mut BytesMut::from(bytes.as_slice()))
             .unwrap()
             .expect("message should decode");

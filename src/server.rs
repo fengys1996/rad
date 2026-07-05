@@ -24,7 +24,7 @@ use crate::error::{IoSnafu, Result};
 use crate::{
     instance::{InstanceHandle, InstanceKey, InstanceManager},
     protocol::{
-        ControlMessage, LspFrame, RadFrameDecoder, RadFrameStream, RadMessage, ServerStatus,
+        ControlMessage, LspFrame, RadFrameCocdec, RadFrameStream, RadMessage, ServerStatus,
     },
 };
 
@@ -87,7 +87,7 @@ async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
     let write_task = tokio::spawn(forward_instance_to_client(cid, w, from_instance));
 
     let m = manager.clone();
-    let frame_stream = RadFrameStream::new(r, RadFrameDecoder);
+    let frame_stream = RadFrameStream::new(r, RadFrameCocdec);
     let read_task = tokio::spawn(forward_client_to_instance(m, cid, frame_stream, to_client));
 
     let may_reader_exit = match read_task.await {

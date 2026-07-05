@@ -1,3 +1,4 @@
+use futures_util::SinkExt;
 use snafu::ResultExt;
 use tokio::{
     io::{self, AsyncWriteExt},
@@ -7,11 +8,12 @@ use tokio::{
     },
 };
 use tokio_stream::StreamExt;
+use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, info, warn};
 
 use crate::error::{PlainTextSnafu, Result};
 use crate::protocol::{
-    ControlMessage, LspFrameDecoder, LspFrameStream, RadFrameDecoder, RadFrameStream, RadMessage,
+    ControlMessage, LspFrameDecoder, LspFrameStream, RadFrameCocdec, RadFrameStream, RadMessage,
 };
 use crate::{config::DEFAULT_ADDR, error::IoSnafu};
 
@@ -38,10 +40,10 @@ pub async fn run(opts: Options) -> Result<()> {
 
     info!(server_addr, "client proxy connected to rad server");
 
-    let (read, write) = stream.into_split();
+    let (r, w) = stream.into_split();
 
-    let upstream = tokio::spawn(stdin_to_server(write));
-    let downstream = tokio::spawn(server_to_stdout(read));
+    let upstream = tokio::spawn(stdin_to_server(w));
+    let downstream = tokio::spawn(server_to_stdout(r));
 
     tokio::select! {
         _ = upstream => {}
@@ -62,20 +64,21 @@ pub async fn status(opts: Options) -> Result<()> {
             detail: format!("failed to connect to red server, server addr: {server_addr}"),
         })?;
 
-    let (read, mut write) = stream.into_split();
-    let request = RadMessage::control(ControlMessage::StatusRequest).to_bytes()?;
-    write.write_all(&request).await?;
-    write.shutdown().await?;
+    let msg = RadMessage::control(ControlMessage::StatusRequest);
+    let (r, w) = stream.into_split();
 
-    let mut stream = RadFrameStream::new(read, RadFrameDecoder);
-    let Some(message) = stream.next().await else {
+    let mut sink = FramedWrite::new(w, RadFrameCocdec);
+    sink.send(msg).await?;
+
+    let mut stream = FramedRead::new(r, RadFrameCocdec);
+    let Some(msg) = stream.next().await else {
         return PlainTextSnafu {
-            msg: "rad server closed connection before status response".to_string(),
+            msg: "rad server closed connection before status response",
         }
         .fail();
     };
 
-    match message? {
+    match msg? {
         RadMessage::Control(ControlMessage::StatusResponse { status }) => {
             if status.instances.is_empty() {
                 println!("no lsp instances");
@@ -144,7 +147,7 @@ async fn stdin_to_server(mut write: OwnedWriteHalf) {
 
 async fn server_to_stdout(read: OwnedReadHalf) {
     let mut stdout = io::stdout();
-    let mut stream = RadFrameStream::new(read, RadFrameDecoder);
+    let mut stream = RadFrameStream::new(read, RadFrameCocdec);
 
     while let Some(message) = stream.next().await {
         let message = match message {
