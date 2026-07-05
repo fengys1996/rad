@@ -13,7 +13,8 @@ use tracing::{debug, info, warn};
 
 use crate::error::{PlainTextSnafu, Result};
 use crate::protocol::{
-    ControlMessage, LspFrameDecoder, LspFrameStream, RadFrameCocdec, RadFrameStream, RadMessage,
+    ControlMessage, InstanceStatus, LspFrameDecoder, LspFrameStream, RadFrameCocdec,
+    RadFrameStream, RadMessage, ServerStatus,
 };
 use crate::{config::DEFAULT_ADDR, error::IoSnafu};
 
@@ -80,22 +81,7 @@ pub async fn status(opts: Options) -> Result<()> {
 
     match msg? {
         RadMessage::Control(ControlMessage::StatusResponse { status }) => {
-            if status.instances.is_empty() {
-                println!("no lsp instances");
-                return Ok(());
-            }
-
-            println!("workspace\tpid\tclients\tidle_secs\thealthy");
-            for instance in status.instances {
-                println!(
-                    "{}\t{}\t{}\t{}\t{}",
-                    instance.workspace,
-                    instance.pid,
-                    instance.client_count,
-                    instance.idle_secs,
-                    instance.healthy
-                );
-            }
+            print!("{}", format_status(status));
             Ok(())
         }
         RadMessage::Control(ControlMessage::Error { message }) => {
@@ -110,6 +96,55 @@ pub async fn status(opts: Options) -> Result<()> {
         }
         .fail(),
     }
+}
+
+fn format_status(mut status: ServerStatus) -> String {
+    if status.instances.is_empty() {
+        return "no lsp instances\n".to_string();
+    }
+
+    status.instances.sort_by(|a, b| {
+        a.workspace
+            .cmp(&b.workspace)
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
+
+    let mut out = String::new();
+    for (idx, instance) in status.instances.iter().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format_instance_status(instance));
+    }
+    out
+}
+
+fn format_instance_status(instance: &InstanceStatus) -> String {
+    format!(
+        "workspace: {}\n  pid:      {}\n  clients:  {}\n  idle:     {}\n  healthy:  {}\n",
+        instance.workspace,
+        instance.pid,
+        instance.client_count,
+        format_duration_secs(instance.idle_secs),
+        if instance.healthy { "yes" } else { "no" },
+    )
+}
+
+fn format_duration_secs(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+    if minutes < 60 {
+        return format!("{minutes}m {seconds}s");
+    }
+
+    let hours = minutes / 60;
+    let minutes = minutes % 60;
+    format!("{hours}h {minutes}m")
 }
 
 async fn stdin_to_server(mut write: OwnedWriteHalf) {
@@ -183,4 +218,65 @@ async fn server_to_stdout(read: OwnedReadHalf) {
     }
 
     debug!("rad server closed connection");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_empty_status() {
+        let status = ServerStatus {
+            instances: Vec::new(),
+        };
+
+        assert_eq!("no lsp instances\n", format_status(status));
+    }
+
+    #[test]
+    fn formats_status_by_workspace() {
+        let status = ServerStatus {
+            instances: vec![
+                InstanceStatus {
+                    workspace: "file:///z".to_string(),
+                    pid: 20,
+                    client_count: 2,
+                    idle_secs: 75,
+                    healthy: false,
+                },
+                InstanceStatus {
+                    workspace: "file:///a".to_string(),
+                    pid: 10,
+                    client_count: 1,
+                    idle_secs: 5,
+                    healthy: true,
+                },
+            ],
+        };
+
+        assert_eq!(
+            concat!(
+                "workspace: file:///a\n",
+                "  pid:      10\n",
+                "  clients:  1\n",
+                "  idle:     5s\n",
+                "  healthy:  yes\n",
+                "\n",
+                "workspace: file:///z\n",
+                "  pid:      20\n",
+                "  clients:  2\n",
+                "  idle:     1m 15s\n",
+                "  healthy:  no\n",
+            ),
+            format_status(status)
+        );
+    }
+
+    #[test]
+    fn formats_duration_secs() {
+        assert_eq!("0s", format_duration_secs(-1));
+        assert_eq!("59s", format_duration_secs(59));
+        assert_eq!("1m 0s", format_duration_secs(60));
+        assert_eq!("1h 1m", format_duration_secs(3661));
+    }
 }
