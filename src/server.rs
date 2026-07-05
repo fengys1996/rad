@@ -9,7 +9,6 @@ use std::{
 
 use snafu::ResultExt;
 use tokio::{
-    io::AsyncWriteExt,
     net::{
         TcpListener, TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -17,6 +16,7 @@ use tokio::{
     sync::mpsc::{Receiver, Sender, channel},
 };
 use tokio_stream::StreamExt;
+use tokio_util::codec::FramedWrite;
 use tracing::{debug, info, warn};
 
 use crate::config::ProjectConfig;
@@ -81,14 +81,22 @@ pub async fn run(opts: Options) -> Result<()> {
 }
 
 async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
-    let (to_client, from_instance) = channel::<Vec<u8>>(4);
+    let (to_writer, from_writer) = channel::<RadMessage>(4);
+    let (to_client, from_client) = channel::<LspFrame>(4);
     let (r, w) = stream.into_split();
 
-    let write_task = tokio::spawn(forward_instance_to_client(cid, w, from_instance));
+    let write_task = tokio::spawn(forward_to_client(cid, w, from_writer));
+    let lsp_adapter_task = tokio::spawn(forward_lsp_to_writer(cid, from_client, to_writer.clone()));
 
     let m = manager.clone();
     let frame_stream = RadFrameStream::new(r, RadFrameCocdec);
-    let read_task = tokio::spawn(forward_client_to_instance(m, cid, frame_stream, to_client));
+    let read_task = tokio::spawn(forward_client_to_instance(
+        m,
+        cid,
+        frame_stream,
+        to_client,
+        to_writer,
+    ));
 
     let may_reader_exit = match read_task.await {
         Ok(Ok(reader_exit)) => Some(reader_exit),
@@ -113,31 +121,42 @@ async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
         );
     }
 
+    if let Err(e) = lsp_adapter_task.await {
+        warn!(cid, error = ?e, "lsp_to_writer task failed");
+    }
+
     if let Err(e) = write_task.await {
         warn!(cid, error = ?e, "instance_to_client task failed");
     }
 }
 
-async fn forward_instance_to_client(
+async fn forward_to_client(
     client_id: u32,
-    mut writer: OwnedWriteHalf,
-    mut from_instance: Receiver<Vec<u8>>,
+    writer: OwnedWriteHalf,
+    mut from_writer: Receiver<RadMessage>,
 ) {
-    while let Some(bytes) = from_instance.recv().await {
-        debug!(
-            client_id,
-            bytes = bytes.len(),
-            "writing rad message to client socket"
-        );
+    let mut sink = FramedWrite::new(writer, RadFrameCocdec);
 
-        if writer.write_all(&bytes).await.is_err() {
-            warn!(client_id, "failed writing message to client socket");
+    while let Some(msg) = from_writer.recv().await {
+        debug!(client_id, "writing rad message to client socket");
+
+        if let Err(e) = futures_util::SinkExt::send(&mut sink, msg).await {
+            warn!(client_id, error = ?e, "failed writing message to client socket");
             break;
         }
     }
+}
 
-    if let Err(e) = writer.shutdown().await {
-        warn!(err = ?e, "failed to shutdown to_client channel");
+async fn forward_lsp_to_writer(
+    client_id: u32,
+    mut from_lsp: Receiver<LspFrame>,
+    to_writer: Sender<RadMessage>,
+) {
+    while let Some(frame) = from_lsp.recv().await {
+        if let Err(e) = to_writer.send(RadMessage::lsp(frame)).await {
+            warn!(client_id, error = ?e, "failed to forward lsp frame to client writer");
+            break;
+        }
     }
 }
 
@@ -145,7 +164,8 @@ async fn forward_client_to_instance(
     manager: InstanceManager,
     cid: u32,
     mut input_stream: RadFrameStream<OwnedReadHalf>,
-    to_client: Sender<Vec<u8>>,
+    to_client_lsp: Sender<LspFrame>,
+    to_writer: Sender<RadMessage>,
 ) -> Result<ReaderExit> {
     let mut session = ClientSessionState::default();
     while let Some(message) = input_stream.next().await {
@@ -163,11 +183,11 @@ async fn forward_client_to_instance(
                 let status = ServerStatus {
                     instances: manager.status().await,
                 };
-                send_to_client(
-                    &to_client,
-                    RadMessage::control(ControlMessage::StatusResponse { status }),
-                )
-                .await;
+                let _ = to_writer
+                    .send(RadMessage::control(ControlMessage::StatusResponse {
+                        status,
+                    }))
+                    .await;
                 continue;
             }
             RadMessage::Control(other) => {
@@ -181,7 +201,7 @@ async fn forward_client_to_instance(
         };
 
         let action =
-            make_client_packet_plan(&manager, cid, &to_client, &mut session, frame).await?;
+            make_client_packet_plan(&manager, cid, &to_client_lsp, &mut session, frame).await?;
 
         match action {
             ClientPacketAction::ForwardToInstance { handle, bytes } => {
@@ -201,8 +221,8 @@ async fn forward_client_to_instance(
                     );
                 }
             }
-            ClientPacketAction::ReplyToClient(bytes) => {
-                let _ = to_client.send(bytes).await;
+            ClientPacketAction::ReplyToClient(frame) => {
+                let _ = to_writer.send(RadMessage::lsp(frame)).await;
             }
             ClientPacketAction::Ignore => {}
         }
@@ -219,7 +239,7 @@ async fn forward_client_to_instance(
 async fn make_client_packet_plan(
     manager: &InstanceManager,
     cid: u32,
-    to_client: &Sender<Vec<u8>>,
+    to_client: &Sender<LspFrame>,
     session: &mut ClientSessionState,
     packet: LspFrame,
 ) -> Result<ClientPacketAction> {
@@ -286,18 +306,7 @@ async fn make_client_packet_plan(
     })
 }
 
-async fn send_to_client(tx: &Sender<Vec<u8>>, message: RadMessage) {
-    match message.to_bytes() {
-        Ok(bytes) => {
-            let _ = tx.send(bytes).await;
-        }
-        Err(e) => {
-            warn!(error = ?e, "failed to encode rad message");
-        }
-    }
-}
-
-fn build_shutdown_response(packet: &LspFrame) -> Option<Vec<u8>> {
+fn build_shutdown_response(packet: &LspFrame) -> Option<LspFrame> {
     let request = packet.body.clone();
     let request_obj = request.as_object()?;
     if request_obj.get("method")?.as_str()? != "shutdown" {
@@ -310,7 +319,7 @@ fn build_shutdown_response(packet: &LspFrame) -> Option<Vec<u8>> {
         "id": id,
         "result": null,
     });
-    RadMessage::lsp(LspFrame::new(response)).to_bytes().ok()
+    Some(LspFrame::new(response))
 }
 
 fn extract_workspace_key(json: &serde_json::Value) -> Option<String> {
@@ -379,7 +388,7 @@ enum ClientPacketAction {
         handle: InstanceHandle,
         bytes: Vec<u8>,
     },
-    ReplyToClient(Vec<u8>),
+    ReplyToClient(LspFrame),
     Ignore,
 }
 

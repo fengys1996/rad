@@ -184,16 +184,16 @@ async fn server_to_stdout(read: OwnedReadHalf) {
     let mut stdout = io::stdout();
     let mut stream = RadFrameStream::new(read, RadFrameCocdec);
 
-    while let Some(message) = stream.next().await {
-        let message = match message {
-            Ok(message) => message,
+    while let Some(msg) = stream.next().await {
+        let msg = match msg {
+            Ok(msg) => msg,
             Err(e) => {
                 warn!(error = ?e, "failed to read rad message from server");
                 break;
             }
         };
 
-        let RadMessage::Lsp(frame) = message else {
+        let RadMessage::Lsp(frame) = msg else {
             warn!("ignoring unexpected control message from rad server");
             continue;
         };
