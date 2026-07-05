@@ -81,9 +81,9 @@ pub async fn run(opts: Options) -> Result<()> {
     }
 }
 
-async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
+async fn process(manager: InstanceManager, cid: u32, incoming: TcpStream) {
     let (to_writer, from_writer) = channel::<RadMessage>(4);
-    let (r, w) = stream.into_split();
+    let (r, w) = incoming.into_split();
 
     let write_task = tokio::spawn(forward_to_client(cid, w, from_writer));
 
