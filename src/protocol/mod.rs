@@ -1,8 +1,8 @@
 pub mod lsp;
 mod lsp_sender;
-pub mod rad;
+pub mod msg;
 pub use lsp::{ClientId, LspFrame, LspFrameDecoder, LspFrameStream};
 pub use lsp_sender::LspSender;
-pub use rad::{
+pub use msg::{
     ControlMessage, InstanceStatus, RadFrameCocdec, RadFrameStream, RadMessage, ServerStatus,
 };

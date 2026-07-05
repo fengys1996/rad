@@ -7,20 +7,18 @@ use std::{
     },
 };
 
+use futures_util::{Sink, SinkExt};
 use snafu::ResultExt;
 use tokio::{
-    net::{
-        TcpListener, TcpStream,
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-    },
+    net::{TcpListener, TcpStream},
     sync::mpsc::{Receiver, Sender, channel},
 };
-use tokio_stream::StreamExt;
+use tokio_stream::{Stream, StreamExt};
 use tokio_util::codec::FramedWrite;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::config::ProjectConfig;
 use crate::error::{IoSnafu, Result};
+use crate::{config::ProjectConfig, error::Error};
 use crate::{
     instance::{InstanceHandle, InstanceKey, InstanceManager},
     protocol::{
@@ -81,161 +79,87 @@ pub async fn run(opts: Options) -> Result<()> {
     }
 }
 
-async fn process(manager: InstanceManager, cid: u32, incoming: TcpStream) {
-    let (to_writer, from_writer) = channel::<RadMessage>(4);
+async fn process(instance_manager: InstanceManager, cid: u32, incoming: TcpStream) {
+    let (to_client, instance_out) = channel::<RadMessage>(4);
     let (r, w) = incoming.into_split();
 
-    let write_task = tokio::spawn(forward_to_client(cid, w, from_writer));
+    let w = FramedWrite::new(w, RadFrameCocdec);
+    let forward_bg_task = tokio::spawn(forward_instance_to_client(cid, w, instance_out));
 
-    let m = manager.clone();
-    let frame_stream = RadFrameStream::new(r, RadFrameCocdec);
-    let to_client = LspSender::new(to_writer.clone());
-    let read_task = tokio::spawn(forward_client_to_instance(
-        m,
+    let ctx = Context {
         cid,
-        frame_stream,
+        instance_manager,
         to_client,
-        to_writer,
-    ));
-
-    let may_reader_exit = match read_task.await {
-        Ok(Ok(reader_exit)) => Some(reader_exit),
-        Ok(Err(e)) => {
-            warn!(cid, error = ?e, "forward_client_to_instance task failed");
-            None
-        }
-        Err(e) => {
-            warn!(cid, error = ?e, "forward_client_to_instance task panicked");
-            None
-        }
     };
+    let incoming_msgs = RadFrameStream::new(r, RadFrameCocdec);
+    let process_task =
+        tokio::spawn(async move { process_incoming_msgs(incoming_msgs, &ctx).await });
 
-    if let Some(reader_exit) = may_reader_exit
-        && let Some(key) = reader_exit.instance_key
-    {
-        manager.detach_client(&key, cid);
-        info!(
-            cid,
-            workspace = %reader_exit.workspace_label,
-            "client detached from instance"
-        );
+    if let Err(e) = process_task.await {
+        warn!(cid, error = ?e, "forward_client_to_instance task panicked");
     }
 
-    if let Err(e) = write_task.await {
-        warn!(cid, error = ?e, "instance_to_client task failed");
+    if let Err(e) = forward_bg_task.await {
+        warn!(cid, error = ?e, "forward instance to client task failed");
     }
 }
 
-async fn forward_to_client(
-    client_id: u32,
-    writer: OwnedWriteHalf,
-    mut from_writer: Receiver<RadMessage>,
-) {
-    let mut sink = FramedWrite::new(writer, RadFrameCocdec);
-
-    while let Some(msg) = from_writer.recv().await {
-        debug!(client_id, "writing rad message to client socket");
-
-        if let Err(e) = futures_util::SinkExt::send(&mut sink, msg).await {
-            warn!(client_id, error = ?e, "failed writing message to client socket");
-            break;
-        }
-    }
-}
-
-async fn forward_client_to_instance(
-    manager: InstanceManager,
+#[derive(Clone)]
+pub struct Context {
     cid: u32,
-    mut input_stream: RadFrameStream<OwnedReadHalf>,
-    to_client: LspSender,
-    to_writer: Sender<RadMessage>,
-) -> Result<ReaderExit> {
-    let mut session = ClientSessionState::default();
-    while let Some(message) = input_stream.next().await {
-        let message = match message {
-            Ok(message) => message,
+    instance_manager: InstanceManager,
+    to_client: Sender<RadMessage>,
+}
+
+async fn process_incoming_msgs<S>(mut incoming: S, ctx: &Context)
+where
+    S: Stream<Item = Result<RadMessage>> + Unpin,
+{
+    let mut client_session = ClientSessionState::default();
+    while let Some(msg) = incoming.next().await {
+        let msg = match msg {
+            Ok(msg) => msg,
             Err(e) => {
-                warn!(cid, error = ?e, "failed to decode rad message");
+                warn!(cid = ctx.cid, error = ?e, "failed to decode rad message");
                 break;
             }
         };
 
-        let frame = match message {
-            RadMessage::Lsp(frame) => frame,
-            RadMessage::Control(ControlMessage::StatusRequest) => {
-                let status = ServerStatus {
-                    instances: manager.status().await,
-                };
-                let _ = to_writer
-                    .send(RadMessage::control(ControlMessage::StatusResponse {
-                        status,
-                    }))
-                    .await;
-                continue;
-            }
-            RadMessage::Control(other) => {
-                warn!(
-                    cid,
-                    ?other,
-                    "ignoring unexpected control message from client"
-                );
-                continue;
-            }
-        };
-
-        let action =
-            make_client_packet_plan(&manager, cid, &to_client, &mut session, frame).await?;
-
-        match action {
-            ClientPacketAction::ForwardToInstance { handle, bytes } => {
-                debug!(
-                    cid,
-                    workspace = handle.key().workspace(),
-                    bytes = bytes.len(),
-                    "sending client message to lsp instance"
-                );
-
-                if let Err(err) = handle.send_with_timeout(cid, bytes).await {
-                    warn!(
-                        cid,
-                        workspace = handle.key().workspace(),
-                        error = ?err,
-                        "failed to send message to lsp instance"
-                    );
-                }
-            }
-            ClientPacketAction::ReplyToClient(frame) => {
-                let _ = to_writer.send(RadMessage::lsp(frame)).await;
-            }
-            ClientPacketAction::Ignore => {}
+        match msg {
+            RadMessage::Lsp(frame) => process_lsp_frame(frame, ctx, &mut client_session).await,
+            RadMessage::Control(ControlMessage::StatusRequest) => process_show_status(ctx).await,
+            _ => process_unsupported(ctx).await,
         }
     }
 
-    info!(cid, "client socket closed");
+    info!(cid = ctx.cid, "client socket closed");
 
-    Ok(ReaderExit {
-        instance_key: session.instance_key,
-        workspace_label: session.workspace_label,
-    })
+    if let Some(key) = client_session.instance_key {
+        let cid = ctx.cid;
+        ctx.instance_manager.detach_client(&key, cid);
+        info!(cid, "client detached from instance");
+    }
 }
 
-async fn make_client_packet_plan(
-    manager: &InstanceManager,
-    cid: u32,
-    to_client: &LspSender,
+async fn process_lsp_frame(frame: LspFrame, ctx: &Context, session: &mut ClientSessionState) {
+    if let Err(e) = do_process_lsp_frame(frame, ctx, session).await {
+        error!(error = ?e, "failed to handle lsp frame");
+    }
+}
+
+async fn do_process_lsp_frame(
+    frame: LspFrame,
+    ctx: &Context,
     session: &mut ClientSessionState,
-    packet: LspFrame,
-) -> Result<ClientPacketAction> {
-    debug!(
-        cid,
-        bytes = packet.to_bytes().map(|b| b.len()).unwrap_or_default(),
-        "read lsp packet from client socket"
-    );
+) -> Result<()> {
+    let cid = ctx.cid;
+    let manager = &ctx.instance_manager;
+    let to_client = LspSender::new(ctx.to_client.clone());
 
     if session.instance_key.is_none() {
         // Bind the client to a per-workspace instance on the first packet we can identify.
         session.workspace_label =
-            extract_workspace_key(&packet.body).unwrap_or_else(|| "default-workspace".to_string());
+            extract_workspace_key(&frame.body).unwrap_or_else(|| "default-workspace".to_string());
         let key = InstanceKey::new(session.workspace_label.clone());
         let (handle, reused) = manager.spawn_instance(cid, to_client.clone(), &key).await?;
         session.instance_key = Some(key);
@@ -249,44 +173,70 @@ async fn make_client_packet_plan(
     }
 
     let Some(handle) = session.instance_handle.clone() else {
-        return Ok(ClientPacketAction::Ignore);
+        return Ok(());
     };
-    let key = handle.key().clone();
 
+    let key = handle.key().clone();
     // When attaching to an existing instance, satisfy initialize from cached capabilities
     // instead of replaying a second initialize into rust-analyzer.
     if session.reusing_existing_instance
-        && packet.is_request_method("initialize")
-        && let Some(request_id) = extract_request_id(&packet)
-        && let Some(response) = manager.build_initialize_response_from_cache(&key, request_id)
+        && frame.is_request_method("initialize")
+        && let Some(request_id) = extract_request_id(&frame)
+        && let Some(resp) = manager.build_initialize_response_from_cache(&key, request_id)
     {
         session.initialize_replied_from_cache = true;
         debug!(cid, workspace = %session.workspace_label, "replying initialize from cached capabilities");
-        return Ok(ClientPacketAction::ReplyToClient(response));
+        // TODO: use error handle, instead of ignore.
+        let _ = to_client.send(resp).await;
+        return Ok(());
     }
 
-    if session.initialize_replied_from_cache && packet.is_method("initialized") {
+    if session.initialize_replied_from_cache && frame.is_method("initialized") {
         debug!(cid, workspace = %session.workspace_label, "ignoring initialized after cached initialize");
-        return Ok(ClientPacketAction::Ignore);
+        return Ok(());
     }
 
-    if packet.is_method("exit") {
+    if frame.is_method("exit") {
         debug!(cid, workspace = %session.workspace_label, "ignoring client exit notification for shared instance");
-        return Ok(ClientPacketAction::Ignore);
+        return Ok(());
     }
 
     // Handle shutdown locally so we can let the shared backend instance keep running.
-    if packet.is_request_method("shutdown")
-        && let Some(response) = build_shutdown_response(&packet)
+    if frame.is_request_method("shutdown")
+        && let Some(resp) = build_shutdown_response(&frame)
     {
         debug!(cid, workspace = %session.workspace_label, "replying shutdown locally for shared instance");
-        return Ok(ClientPacketAction::ReplyToClient(response));
+        // TODO: use error handle, instead of ignore.
+        let _ = to_client.send(resp).await;
+        return Ok(());
     }
 
-    Ok(ClientPacketAction::ForwardToInstance {
-        handle,
-        bytes: packet.to_bytes()?,
-    })
+    handle.send_with_timeout(cid, frame.to_bytes()?).await
+}
+
+async fn process_show_status(ctx: &Context) {
+    let instances = ctx.instance_manager.status().await;
+    let status = ServerStatus { instances };
+    let status_resp = ControlMessage::StatusResponse { status };
+    let _ = ctx.to_client.send(RadMessage::control(status_resp)).await;
+}
+
+async fn process_unsupported(ctx: &Context) {
+    let cid = ctx.cid;
+    warn!(cid, "ignoring unexpected control message from client");
+}
+
+async fn forward_instance_to_client<W>(c_id: u32, mut w: W, mut instance_out: Receiver<RadMessage>)
+where
+    W: Sink<RadMessage, Error = Error> + Unpin,
+{
+    while let Some(msg) = instance_out.recv().await {
+        debug!(c_id, "writing rad message to client socket");
+        if let Err(e) = w.send(msg).await {
+            warn!(c_id, error = ?e, "failed writing message to client socket");
+            break;
+        }
+    }
 }
 
 fn build_shutdown_response(packet: &LspFrame) -> Option<LspFrame> {
@@ -339,12 +289,6 @@ fn extract_workspace_key(json: &serde_json::Value) -> Option<String> {
     None
 }
 
-#[derive(Default)]
-struct ReaderExit {
-    instance_key: Option<InstanceKey>,
-    workspace_label: String,
-}
-
 struct ClientSessionState {
     instance_key: Option<InstanceKey>,
     instance_handle: Option<InstanceHandle>,
@@ -363,16 +307,6 @@ impl Default for ClientSessionState {
             initialize_replied_from_cache: false,
         }
     }
-}
-
-enum ClientPacketAction {
-    // TODO: optimize make bytes to LspFrame
-    ForwardToInstance {
-        handle: InstanceHandle,
-        bytes: Vec<u8>,
-    },
-    ReplyToClient(LspFrame),
-    Ignore,
 }
 
 fn extract_request_id(packet: &LspFrame) -> Option<serde_json::Value> {
