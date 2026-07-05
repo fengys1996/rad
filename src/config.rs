@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use clap::{Arg, ArgMatches, Command};
+use clap::{CommandFactory, Parser, Subcommand};
 use serde::Deserialize;
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:27631";
@@ -52,12 +52,33 @@ pub struct Args {
     pub config_path: PathBuf,
 }
 
+#[derive(Parser)]
+#[command(
+    name = "rad",
+    about = "rust-analyzer daemon",
+    disable_help_subcommand = true,
+    override_usage = "rad [server|client] [options]"
+)]
+struct Cli {
+    #[command(subcommand)]
+    mode: Option<Mode>,
+
+    #[arg(
+        short = 'c',
+        long = "config-file",
+        value_name = "path",
+        help = config_file_help(),
+        global = true,
+    )]
+    config_path: Option<PathBuf>,
+}
+
 pub fn parse_args() -> Args {
     parse_args_from(std::env::args())
 }
 
 pub fn print_help_and_exit() -> ! {
-    let _ = command().print_help();
+    let _ = Cli::command().print_help();
     println!();
     std::process::exit(0)
 }
@@ -86,7 +107,7 @@ pub fn load_config(path: &PathBuf) -> RadConfig {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum Mode {
     Server,
     Client,
@@ -97,66 +118,18 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let matches = command().get_matches_from(args);
+    let cli = Cli::parse_from(args);
     Args {
-        mode: parse_mode(&matches),
-        config_path: parse_config_path(&matches),
+        mode: cli.mode,
+        config_path: cli.config_path.unwrap_or_else(default_config_path),
     }
 }
 
-fn command() -> Command {
-    Command::new("rad")
-        .about("rust-analyzer daemon")
-        .disable_help_subcommand(true)
-        .override_usage("rad [server|client] [options]")
-        .after_help(config_help())
-        .arg(
-            Arg::new("config-file")
-                .short('c')
-                .long("config-file")
-                .value_name("path")
-                .help(format!(
-                    "Path to config file (default: {})",
-                    default_config_path().display()
-                ))
-                .global(true),
-        )
-        .subcommand(Command::new("server").about("Run the daemon server"))
-        .subcommand(Command::new("client").about("Run a daemon client"))
-}
-
-fn config_help() -> String {
+fn config_file_help() -> String {
     format!(
-        "
-Config file format (TOML):
-  lsp_server_path         = \"/path/to/rust-analyzer\"  # optional LSP server path
-  cargo_path              = \"/path/to/cargo\"  # optional cargo binary path
-  instance_timeout        = {}   # idle timeout in seconds before reaping
-  gc_interval             = {}    # interval in seconds between reaper scans
-  listen                  = [\"{}\", {}]  # daemon listen host and port
-
-  [projects.\"/absolute/path\"]
-  lsp_server_path = \"/custom/rust-analyzer\"  # per-project override",
-        default_instance_timeout(),
-        default_gc_interval(),
-        default_listen().0,
-        default_listen().1,
+        "Path to config file (default: {})",
+        default_config_path().display()
     )
-}
-
-fn parse_mode(matches: &ArgMatches) -> Option<Mode> {
-    match matches.subcommand_name() {
-        Some("server") => Some(Mode::Server),
-        Some("client") => Some(Mode::Client),
-        _ => None,
-    }
-}
-
-fn parse_config_path(matches: &ArgMatches) -> PathBuf {
-    matches
-        .get_one::<String>("config-file")
-        .map(PathBuf::from)
-        .unwrap_or_else(default_config_path)
 }
 
 fn default_config_path() -> PathBuf {
