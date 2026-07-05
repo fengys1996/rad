@@ -39,10 +39,6 @@ to override it.
 An example config file is provided at [`rad.toml`](rad.toml) in the repository
 root.
 
-## How it work?
-
-todo
-
 ## How to Use
 
 ### Run rad Server
@@ -111,4 +107,48 @@ chmod +x ~/.local/bin/rad-ra
 {
   "rust-analyzer.server.path": "{path}/rad-ra"
 }
+```
+
+### rad status
+
+Show all running LSP instances:
+
+```bash
+rad status
+```
+
+Example output:
+
+```
+workspace: file:///home/user/greptimedb
+  pid:      12345
+  clients:  2
+  idle:     1m 15s
+  healthy:  yes
+
+workspace: file:///home/user/rad
+  pid:      67890
+  clients:  0
+  idle:     5m 30s
+  healthy:  yes
+```
+
+### rad clean
+
+Remove idle instances (no attached clients):
+
+```bash
+rad clean
+```
+
+Remove all instances, regardless of client count:
+
+```bash
+rad clean -f
+```
+
+Example output:
+
+```
+file:///home/user/rad (pid: 67890)
 ```
