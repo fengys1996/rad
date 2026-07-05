@@ -57,7 +57,7 @@ pub struct Args {
     name = "rad",
     about = "rust-analyzer daemon",
     disable_help_subcommand = true,
-    override_usage = "rad [server|client] [options]"
+    override_usage = "rad [server|client|status] [options]"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -111,6 +111,7 @@ pub fn load_config(path: &PathBuf) -> RadConfig {
 pub enum Mode {
     Server,
     Client,
+    Status,
 }
 
 fn parse_args_from<I, T>(args: I) -> Args
@@ -177,6 +178,13 @@ mod tests {
         let args = parse_args_from(["rad", "client"]);
 
         assert_eq!(Some(Mode::Client), args.mode);
+    }
+
+    #[test]
+    fn parses_status_mode() {
+        let args = parse_args_from(["rad", "status"]);
+
+        assert_eq!(Some(Mode::Status), args.mode);
     }
 
     #[test]

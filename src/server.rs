@@ -9,7 +9,6 @@ use std::{
 
 use snafu::ResultExt;
 use tokio::{
-    io::AsyncWriteExt,
     net::{
         TcpListener, TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -17,13 +16,17 @@ use tokio::{
     sync::mpsc::{Receiver, Sender, channel},
 };
 use tokio_stream::StreamExt;
+use tokio_util::codec::FramedWrite;
 use tracing::{debug, info, warn};
 
 use crate::config::ProjectConfig;
 use crate::error::{IoSnafu, Result};
 use crate::{
     instance::{InstanceHandle, InstanceKey, InstanceManager},
-    protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
+    protocol::{
+        ControlMessage, LspFrame, LspSender, RadFrameCocdec, RadFrameStream, RadMessage,
+        ServerStatus,
+    },
 };
 
 pub struct Options {
@@ -78,15 +81,22 @@ pub async fn run(opts: Options) -> Result<()> {
     }
 }
 
-async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
-    let (to_client, from_instance) = channel::<Vec<u8>>(4);
-    let (r, w) = stream.into_split();
+async fn process(manager: InstanceManager, cid: u32, incoming: TcpStream) {
+    let (to_writer, from_writer) = channel::<RadMessage>(4);
+    let (r, w) = incoming.into_split();
 
-    let write_task = tokio::spawn(forward_instance_to_client(cid, w, from_instance));
+    let write_task = tokio::spawn(forward_to_client(cid, w, from_writer));
 
     let m = manager.clone();
-    let frame_stream = LspFrameStream::new(r, LspFrameDecoder);
-    let read_task = tokio::spawn(forward_client_to_instance(m, cid, frame_stream, to_client));
+    let frame_stream = RadFrameStream::new(r, RadFrameCocdec);
+    let to_client = LspSender::new(to_writer.clone());
+    let read_task = tokio::spawn(forward_client_to_instance(
+        m,
+        cid,
+        frame_stream,
+        to_client,
+        to_writer,
+    ));
 
     let may_reader_exit = match read_task.await {
         Ok(Ok(reader_exit)) => Some(reader_exit),
@@ -116,42 +126,60 @@ async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
     }
 }
 
-async fn forward_instance_to_client(
+async fn forward_to_client(
     client_id: u32,
-    mut writer: OwnedWriteHalf,
-    mut input_stream: Receiver<Vec<u8>>,
+    writer: OwnedWriteHalf,
+    mut from_writer: Receiver<RadMessage>,
 ) {
-    while let Some(msg) = input_stream.recv().await {
-        debug!(
-            client_id,
-            bytes = msg.len(),
-            "writing instance message to client socket"
-        );
+    let mut sink = FramedWrite::new(writer, RadFrameCocdec);
 
-        if writer.write_all(&msg).await.is_err() {
-            warn!(client_id, "failed writing message to client socket");
+    while let Some(msg) = from_writer.recv().await {
+        debug!(client_id, "writing rad message to client socket");
+
+        if let Err(e) = futures_util::SinkExt::send(&mut sink, msg).await {
+            warn!(client_id, error = ?e, "failed writing message to client socket");
             break;
         }
-    }
-
-    if let Err(e) = writer.shutdown().await {
-        warn!(err = ?e, "failed to shutdown to_client channel");
     }
 }
 
 async fn forward_client_to_instance(
     manager: InstanceManager,
     cid: u32,
-    mut input_stream: LspFrameStream<OwnedReadHalf>,
-    to_client: Sender<Vec<u8>>,
+    mut input_stream: RadFrameStream<OwnedReadHalf>,
+    to_client: LspSender,
+    to_writer: Sender<RadMessage>,
 ) -> Result<ReaderExit> {
     let mut session = ClientSessionState::default();
-    while let Some(frame) = input_stream.next().await {
-        let frame = match frame {
-            Ok(frame) => frame,
+    while let Some(message) = input_stream.next().await {
+        let message = match message {
+            Ok(message) => message,
             Err(e) => {
-                warn!(cid, error = ?e, "failed to decode client frame");
+                warn!(cid, error = ?e, "failed to decode rad message");
                 break;
+            }
+        };
+
+        let frame = match message {
+            RadMessage::Lsp(frame) => frame,
+            RadMessage::Control(ControlMessage::StatusRequest) => {
+                let status = ServerStatus {
+                    instances: manager.status().await,
+                };
+                let _ = to_writer
+                    .send(RadMessage::control(ControlMessage::StatusResponse {
+                        status,
+                    }))
+                    .await;
+                continue;
+            }
+            RadMessage::Control(other) => {
+                warn!(
+                    cid,
+                    ?other,
+                    "ignoring unexpected control message from client"
+                );
+                continue;
             }
         };
 
@@ -176,8 +204,8 @@ async fn forward_client_to_instance(
                     );
                 }
             }
-            ClientPacketAction::ReplyToClient(bytes) => {
-                let _ = to_client.send(bytes).await;
+            ClientPacketAction::ReplyToClient(frame) => {
+                let _ = to_writer.send(RadMessage::lsp(frame)).await;
             }
             ClientPacketAction::Ignore => {}
         }
@@ -194,7 +222,7 @@ async fn forward_client_to_instance(
 async fn make_client_packet_plan(
     manager: &InstanceManager,
     cid: u32,
-    to_client: &Sender<Vec<u8>>,
+    to_client: &LspSender,
     session: &mut ClientSessionState,
     packet: LspFrame,
 ) -> Result<ClientPacketAction> {
@@ -261,7 +289,7 @@ async fn make_client_packet_plan(
     })
 }
 
-fn build_shutdown_response(packet: &LspFrame) -> Option<Vec<u8>> {
+fn build_shutdown_response(packet: &LspFrame) -> Option<LspFrame> {
     let request = packet.body.clone();
     let request_obj = request.as_object()?;
     if request_obj.get("method")?.as_str()? != "shutdown" {
@@ -274,7 +302,7 @@ fn build_shutdown_response(packet: &LspFrame) -> Option<Vec<u8>> {
         "id": id,
         "result": null,
     });
-    Some(LspFrame::new(response).to_bytes().unwrap())
+    Some(LspFrame::new(response))
 }
 
 fn extract_workspace_key(json: &serde_json::Value) -> Option<String> {
@@ -343,7 +371,7 @@ enum ClientPacketAction {
         handle: InstanceHandle,
         bytes: Vec<u8>,
     },
-    ReplyToClient(Vec<u8>),
+    ReplyToClient(LspFrame),
     Ignore,
 }
 
