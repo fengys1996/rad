@@ -32,7 +32,9 @@ use crate::error::{PlainTextSnafu, Result};
 use crate::{config::ProjectConfig, error::IoSnafu};
 use crate::{
     mapper::ReqIdMapper,
-    protocol::{InstanceStatus, LspFrame, LspFrameDecoder, LspFrameStream, LspSender},
+    protocol::{
+        ClearedInstance, InstanceStatus, LspFrame, LspFrameDecoder, LspFrameStream, LspSender,
+    },
 };
 
 const INSTANCE_SEND_TIMEOUT_MS: u64 = 100;
@@ -287,6 +289,55 @@ impl InstanceManager {
         }
 
         statuses
+    }
+
+    pub async fn clear_idle(&self) -> Vec<ClearedInstance> {
+        let to_clear: Vec<(InstanceKey, InstanceRef)> = self
+            .instances
+            .iter()
+            .filter(|entry| entry.value().clients.is_empty())
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        let mut cleared = Vec::with_capacity(to_clear.len());
+        for (key, instance) in to_clear {
+            if self.instances.remove(&key).is_some() {
+                info!(
+                    workspace = %key.workspace,
+                    pid = instance.pid,
+                    "clearing idle lsp instance"
+                );
+                cleared.push(ClearedInstance {
+                    workspace: key.workspace.clone(),
+                    pid: instance.pid,
+                });
+                instance.shutdown().await;
+            }
+        }
+        cleared
+    }
+
+    pub async fn clear_all(&self) -> Vec<ClearedInstance> {
+        let all: Vec<(InstanceKey, InstanceRef)> = self
+            .instances
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        let mut cleared = Vec::with_capacity(all.len());
+        for (key, instance) in all {
+            if self.instances.remove(&key).is_some() {
+                info!(
+                    workspace = %key.workspace,
+                    pid = instance.pid,
+                    "clearing lsp instance"
+                );
+                cleared.push(ClearedInstance {
+                    workspace: key.workspace.clone(),
+                    pid: instance.pid,
+                });
+                instance.shutdown().await;
+            }
+        }
+        cleared
     }
 }
 

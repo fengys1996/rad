@@ -128,6 +128,9 @@ where
         match msg {
             RadMessage::Lsp(frame) => process_lsp_frame(frame, ctx, &mut client_session).await,
             RadMessage::Control(ControlMessage::StatusRequest) => process_show_status(ctx).await,
+            RadMessage::Control(ControlMessage::ClearRequest { force }) => {
+                process_clear(ctx, force).await
+            }
             _ => process_unsupported(ctx).await,
         }
     }
@@ -224,6 +227,20 @@ async fn process_show_status(ctx: &Context) {
 async fn process_unsupported(ctx: &Context) {
     let cid = ctx.cid;
     warn!(cid, "ignoring unexpected control message from client");
+}
+
+async fn process_clear(ctx: &Context, force: bool) {
+    let cleared = if force {
+        ctx.instance_manager.clear_all().await
+    } else {
+        ctx.instance_manager.clear_idle().await
+    };
+    let _ = ctx
+        .to_client
+        .send(RadMessage::control(ControlMessage::ClearResponse {
+            cleared,
+        }))
+        .await;
 }
 
 async fn forward_instance_to_client<W>(c_id: u32, mut w: W, mut instance_out: Receiver<RadMessage>)

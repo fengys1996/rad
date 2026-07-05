@@ -123,7 +123,15 @@ impl RadMessage {
 pub enum ControlMessage {
     StatusRequest,
     StatusResponse { status: ServerStatus },
+    ClearRequest { force: bool },
+    ClearResponse { cleared: Vec<ClearedInstance> },
     Error { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClearedInstance {
+    pub workspace: String,
+    pub pid: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

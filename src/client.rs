@@ -91,6 +91,64 @@ pub async fn status(opts: Options) -> Result<()> {
             msg: "unexpected status request from rad server".to_string(),
         }
         .fail(),
+        RadMessage::Control(ControlMessage::ClearRequest { .. })
+        | RadMessage::Control(ControlMessage::ClearResponse { .. }) => PlainTextSnafu {
+            msg: "unexpected clear message from rad server".to_string(),
+        }
+        .fail(),
+        RadMessage::Lsp(_) => PlainTextSnafu {
+            msg: "unexpected lsp message from rad server".to_string(),
+        }
+        .fail(),
+    }
+}
+
+pub async fn clean(opts: Options, force: bool) -> Result<()> {
+    let Options { server_addr } = opts;
+
+    let stream = TcpStream::connect(&server_addr)
+        .await
+        .with_context(|_| IoSnafu {
+            detail: format!("failed to connect to red server, server addr: {server_addr}"),
+        })?;
+
+    let msg = RadMessage::control(ControlMessage::ClearRequest { force });
+    let (r, w) = stream.into_split();
+
+    let mut sink = FramedWrite::new(w, RadFrameCocdec);
+    sink.send(msg).await?;
+
+    let mut stream = FramedRead::new(r, RadFrameCocdec);
+    let Some(msg) = stream.next().await else {
+        return PlainTextSnafu {
+            msg: "rad server closed connection before clean response",
+        }
+        .fail();
+    };
+
+    match msg? {
+        RadMessage::Control(ControlMessage::ClearResponse { cleared }) => {
+            if cleared.is_empty() {
+                println!("no instances to clean");
+            } else {
+                for instance in &cleared {
+                    println!("{} (pid: {})", instance.workspace, instance.pid);
+                }
+            }
+            Ok(())
+        }
+        RadMessage::Control(ControlMessage::Error { message }) => {
+            PlainTextSnafu { msg: message }.fail()
+        }
+        RadMessage::Control(ControlMessage::StatusResponse { .. }) => PlainTextSnafu {
+            msg: "unexpected status response from rad server".to_string(),
+        }
+        .fail(),
+        RadMessage::Control(ControlMessage::ClearRequest { .. })
+        | RadMessage::Control(ControlMessage::StatusRequest) => PlainTextSnafu {
+            msg: "unexpected request from rad server".to_string(),
+        }
+        .fail(),
         RadMessage::Lsp(_) => PlainTextSnafu {
             msg: "unexpected lsp message from rad server".to_string(),
         }

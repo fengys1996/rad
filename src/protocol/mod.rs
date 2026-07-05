@@ -4,5 +4,6 @@ pub mod msg;
 pub use lsp::{ClientId, LspFrame, LspFrameDecoder, LspFrameStream};
 pub use lsp_sender::LspSender;
 pub use msg::{
-    ControlMessage, InstanceStatus, RadFrameCocdec, RadFrameStream, RadMessage, ServerStatus,
+    ClearedInstance, ControlMessage, InstanceStatus, RadFrameCocdec, RadFrameStream, RadMessage,
+    ServerStatus,
 };

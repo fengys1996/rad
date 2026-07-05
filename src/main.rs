@@ -50,6 +50,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
             guard
         }
+        Mode::Clean { force } => {
+            let guard = init_logging(default_client_options());
+            client::clean(
+                client::Options {
+                    server_addr: config.listen_addr(),
+                },
+                force,
+            )
+            .await?;
+            guard
+        }
     };
     Ok(())
 }

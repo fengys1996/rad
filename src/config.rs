@@ -57,7 +57,7 @@ pub struct Args {
     name = "rad",
     about = "rust-analyzer daemon",
     disable_help_subcommand = true,
-    override_usage = "rad [server|client|status] [options]"
+    override_usage = "rad [server|client|status|clean] [options]"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -112,6 +112,11 @@ pub enum Mode {
     Server,
     Client,
     Status,
+    #[command(about = "Remove idle LSP instances (use -f to remove all)")]
+    Clean {
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 fn parse_args_from<I, T>(args: I) -> Args
@@ -185,6 +190,20 @@ mod tests {
         let args = parse_args_from(["rad", "status"]);
 
         assert_eq!(Some(Mode::Status), args.mode);
+    }
+
+    #[test]
+    fn parses_clean_mode() {
+        let args = parse_args_from(["rad", "clean"]);
+
+        assert_eq!(Some(Mode::Clean { force: false }), args.mode);
+    }
+
+    #[test]
+    fn parses_clean_mode_force() {
+        let args = parse_args_from(["rad", "clean", "-f"]);
+
+        assert_eq!(Some(Mode::Clean { force: true }), args.mode);
     }
 
     #[test]
