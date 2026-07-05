@@ -36,8 +36,6 @@ It also allows multiple editors opening the same workspace to reuse a single
 The default config path is `~/.config/rad/rad.toml`. Use `-c` / `--config-file`
 to override it.
 
-Run `rad --help` to see all config options and defaults.
-
 An example config file is provided at [`rad.toml`](rad.toml) in the repository
 root.
 

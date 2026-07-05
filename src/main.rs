@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 instance_timeout: Duration::from_secs(config.instance_timeout),
                 gc_interval: Duration::from_secs(config.gc_interval),
                 lsp_server_path: config.lsp_server_path,
-                cargo_path: config.cargo_path,
+                path_prepend: config.path_prepend,
                 project_overrides: config.projects,
             })
             .await?;

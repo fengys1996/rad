@@ -17,7 +17,7 @@ pub struct RadConfig {
     #[serde(default)]
     pub lsp_server_path: Option<PathBuf>,
     #[serde(default)]
-    pub cargo_path: Option<PathBuf>,
+    pub path_prepend: Vec<PathBuf>,
     #[serde(default)]
     pub projects: HashMap<String, ProjectConfig>,
     #[serde(default = "default_instance_timeout")]
@@ -32,7 +32,7 @@ impl Default for RadConfig {
     fn default() -> Self {
         Self {
             lsp_server_path: None,
-            cargo_path: None,
+            path_prepend: Vec::new(),
             projects: HashMap::new(),
             instance_timeout: default_instance_timeout(),
             gc_interval: default_gc_interval(),

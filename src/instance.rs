@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     env::{join_paths, split_paths},
-    iter::once,
+    ffi::OsString,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -41,7 +41,7 @@ const INSTANCE_SEND_TIMEOUT_MS: u64 = 100;
 pub struct InstanceManager {
     instances: Arc<DashMap<InstanceKey, InstanceRef>>,
     lsp_server_path: Arc<PathBuf>,
-    cargo_path: Arc<Option<PathBuf>>,
+    path_prepend: Arc<Vec<PathBuf>>,
     project_overrides: Arc<HashMap<String, ProjectConfig>>,
 }
 
@@ -50,14 +50,14 @@ impl InstanceManager {
         instance_timeout: Duration,
         gc_interval: Duration,
         lsp_server_path: Option<PathBuf>,
-        cargo_path: Option<PathBuf>,
+        path_prepend: Vec<PathBuf>,
         project_overrides: HashMap<String, ProjectConfig>,
     ) -> Result<Self> {
         if let Some(path) = &lsp_server_path {
             ensure_absolute_path("lsp_server_path", path)?;
         }
-        if let Some(path) = &cargo_path {
-            ensure_absolute_path("cargo_path", path)?;
+        for path in &path_prepend {
+            ensure_absolute_path("path_prepend", path)?;
         }
         for (project_path, cfg) in project_overrides.iter() {
             if let Some(path) = &cfg.lsp_server_path {
@@ -71,7 +71,7 @@ impl InstanceManager {
         Ok(Self {
             instances,
             lsp_server_path: Arc::new(lsp_server_path),
-            cargo_path: Arc::new(cargo_path),
+            path_prepend: Arc::new(path_prepend),
             project_overrides: Arc::new(project_overrides),
         })
     }
@@ -209,7 +209,7 @@ impl InstanceManager {
                 let lsp_server_path = self.resolve_lsp_server_path(key.workspace_dir().as_deref());
                 let instance = Arc::new(Instance::new(
                     lsp_server_path,
-                    self.cargo_path.as_deref(),
+                    &self.path_prepend,
                     key.workspace_dir(),
                 )?);
                 info!(
@@ -225,7 +225,7 @@ impl InstanceManager {
             let lsp_server_path = self.resolve_lsp_server_path(key.workspace_dir().as_deref());
             let instance = Arc::new(Instance::new(
                 lsp_server_path,
-                self.cargo_path.as_deref(),
+                &self.path_prepend,
                 key.workspace_dir(),
             )?);
             info!(
@@ -317,7 +317,7 @@ type InstanceRef = Arc<Instance>;
 impl Instance {
     fn new(
         lsp_server_path: &Path,
-        cargo_path: Option<&Path>,
+        path_prepend: &[PathBuf],
         workspace_dir: Option<PathBuf>,
     ) -> Result<Instance> {
         let mut command = Command::new(lsp_server_path);
@@ -325,8 +325,8 @@ impl Instance {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        if let Some(path) = cargo_path {
-            prepend_cargo_dir_to_path(&mut command, path)?;
+        if !path_prepend.is_empty() {
+            prepend_paths_to_path(&mut command, path_prepend)?;
         }
         if let Some(dir) = workspace_dir {
             command.current_dir(dir);
@@ -450,32 +450,24 @@ impl Instance {
     }
 }
 
-fn prepend_cargo_dir_to_path(command: &mut Command, cargo_path: &Path) -> Result<()> {
-    let cargo_dir = cargo_path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty());
-
-    let Some(cargo_dir) = cargo_dir else {
-        return PlainTextSnafu {
-            msg: format!(
-                "cargo_path must include a parent directory, got {:?}",
-                cargo_path
-            ),
-        }
-        .fail();
-    };
-
+fn prepend_paths_to_path(command: &mut Command, path_prepend: &[PathBuf]) -> Result<()> {
     let curr_path = std::env::var_os("PATH").unwrap_or_default();
-    let paths = once(cargo_dir.to_path_buf()).chain(split_paths(&curr_path));
+    let path = build_path_with_prepend(path_prepend, curr_path)?;
+
+    command.env("PATH", path);
+    Ok(())
+}
+
+fn build_path_with_prepend(path_prepend: &[PathBuf], curr_path: OsString) -> Result<OsString> {
+    let paths = path_prepend.iter().cloned().chain(split_paths(&curr_path));
     let path = join_paths(paths).map_err(|err| {
         PlainTextSnafu {
-            msg: format!("failed to build PATH with cargo_path: {err}"),
+            msg: format!("failed to build PATH with path_prepend: {err}"),
         }
         .build()
     })?;
 
-    command.env("PATH", path);
-    Ok(())
+    Ok(path)
 }
 
 struct ClientMessage {
@@ -711,7 +703,7 @@ mod tests {
             return;
         }
 
-        let instance = Instance::new(Path::new("rust-analyzer"), None, None).unwrap();
+        let instance = Instance::new(Path::new("rust-analyzer"), &[], None).unwrap();
 
         instance.shutdown().await;
 
@@ -762,5 +754,26 @@ mod tests {
             .arg("--version")
             .output()
             .is_ok_and(|output| output.status.success())
+    }
+
+    #[test]
+    fn builds_path_with_prepend_in_config_order() {
+        let current = join_paths([PathBuf::from("/usr/bin"), PathBuf::from("/bin")]).unwrap();
+        let path = build_path_with_prepend(
+            &[PathBuf::from("/opt/a/bin"), PathBuf::from("/opt/b/bin")],
+            current,
+        )
+        .unwrap();
+        let paths = split_paths(&path).collect::<Vec<_>>();
+
+        assert_eq!(
+            vec![
+                PathBuf::from("/opt/a/bin"),
+                PathBuf::from("/opt/b/bin"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+            ],
+            paths
+        );
     }
 }

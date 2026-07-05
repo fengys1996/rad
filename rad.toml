@@ -9,16 +9,19 @@
 # For example:
 # lsp_server_path = "/path/to/rust-analyzer"
 
-# Cargo binary path(Optional).
+# Extra directories to prepend to PATH when starting LSP servers(Optional).
 #
-# If this is not set, rust-analyzer will look for `cargo` in PATH. If set, this
-# should be an absolute path.
+# Each entry should be an absolute directory path. Entries are prepended in the
+# order listed here, before rad's existing PATH.
 #
-# This is useful when rad is started by systemd without a fully configured
-# PATH and rust-analyzer cannot find `cargo` when it runs flycheck.
+# This is useful when rad is started by systemd or launchd with a minimal PATH.
+# For example, rust-analyzer may fail to run cargo for flycheck unless Cargo's
+# bin directory is added here.
 #
 # For example:
-# cargo_path = "/path/to/cargo"
+# path_prepend = [
+#   "/path/to/.cargo/bin",
+# ]
 
 # Instance idle timeout in seconds(Optional).
 #

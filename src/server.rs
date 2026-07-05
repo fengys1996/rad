@@ -31,7 +31,7 @@ pub struct Options {
     pub instance_timeout: std::time::Duration,
     pub gc_interval: std::time::Duration,
     pub lsp_server_path: Option<PathBuf>,
-    pub cargo_path: Option<PathBuf>,
+    pub path_prepend: Vec<PathBuf>,
     pub project_overrides: HashMap<String, ProjectConfig>,
 }
 
@@ -41,7 +41,7 @@ pub async fn run(opts: Options) -> Result<()> {
         instance_timeout,
         gc_interval,
         lsp_server_path,
-        cargo_path,
+        path_prepend,
         project_overrides,
     } = opts;
 
@@ -57,7 +57,7 @@ pub async fn run(opts: Options) -> Result<()> {
         instance_timeout,
         gc_interval,
         lsp_server_path,
-        cargo_path,
+        path_prepend,
         project_overrides,
     )
     .await?;
