@@ -168,7 +168,7 @@ impl ReqIdMapper {
         let Some(obj) = json.as_object_mut() else {
             return Ok(RoutedPacket {
                 client_id: active_client_id,
-                bytes: packet.to_bytes()?,
+                frame: packet,
             });
         };
 
@@ -187,7 +187,7 @@ impl ReqIdMapper {
                 .remove(&(pending.client_id, pending.raw_req_id.clone()));
             obj.insert("id".to_string(), pending.raw_req_id.to_value());
 
-            let bytes = LspFrame::new(json).to_bytes()?;
+            let frame = LspFrame::new(json);
 
             debug!(
                 pid,
@@ -199,17 +199,17 @@ impl ReqIdMapper {
 
             return Ok(RoutedPacket {
                 client_id: pending.client_id,
-                bytes,
+                frame,
             });
         }
 
         Ok(RoutedPacket {
             client_id: active_client_id,
-            bytes: packet.to_bytes()?,
+            frame: packet,
         })
     }
 
-    pub(crate) fn initialize_response_from_cache(&self, request_id: Value) -> Option<Vec<u8>> {
+    pub(crate) fn initialize_response_from_cache(&self, request_id: Value) -> Option<LspFrame> {
         let result = self.init_resp_cache.read().ok()?.clone()?;
         let response = serde_json::json!({
             "jsonrpc": "2.0",
@@ -218,13 +218,13 @@ impl ReqIdMapper {
         });
         let body = serde_json::to_vec(&response).ok()?;
         let json: Value = serde_json::from_slice(&body).ok()?;
-        Some(LspFrame::new(json).to_bytes().unwrap())
+        Some(LspFrame::new(json))
     }
 }
 
 pub(crate) struct RoutedPacket {
     pub(crate) client_id: u32,
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) frame: LspFrame,
 }
 
 fn is_req(obj: &Map<String, Value>) -> bool {

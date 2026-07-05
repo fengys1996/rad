@@ -23,7 +23,9 @@ use crate::config::ProjectConfig;
 use crate::error::{IoSnafu, Result};
 use crate::{
     instance::{InstanceHandle, InstanceKey, InstanceManager},
-    protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
+    protocol::{
+        ControlMessage, LspFrame, RadFrameDecoder, RadFrameStream, RadMessage, ServerStatus,
+    },
 };
 
 pub struct Options {
@@ -85,7 +87,7 @@ async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
     let write_task = tokio::spawn(forward_instance_to_client(cid, w, from_instance));
 
     let m = manager.clone();
-    let frame_stream = LspFrameStream::new(r, LspFrameDecoder);
+    let frame_stream = RadFrameStream::new(r, RadFrameDecoder);
     let read_task = tokio::spawn(forward_client_to_instance(m, cid, frame_stream, to_client));
 
     let may_reader_exit = match read_task.await {
@@ -119,16 +121,16 @@ async fn process(manager: InstanceManager, cid: u32, stream: TcpStream) {
 async fn forward_instance_to_client(
     client_id: u32,
     mut writer: OwnedWriteHalf,
-    mut input_stream: Receiver<Vec<u8>>,
+    mut from_instance: Receiver<Vec<u8>>,
 ) {
-    while let Some(msg) = input_stream.recv().await {
+    while let Some(bytes) = from_instance.recv().await {
         debug!(
             client_id,
-            bytes = msg.len(),
-            "writing instance message to client socket"
+            bytes = bytes.len(),
+            "writing rad message to client socket"
         );
 
-        if writer.write_all(&msg).await.is_err() {
+        if writer.write_all(&bytes).await.is_err() {
             warn!(client_id, "failed writing message to client socket");
             break;
         }
@@ -142,16 +144,39 @@ async fn forward_instance_to_client(
 async fn forward_client_to_instance(
     manager: InstanceManager,
     cid: u32,
-    mut input_stream: LspFrameStream<OwnedReadHalf>,
+    mut input_stream: RadFrameStream<OwnedReadHalf>,
     to_client: Sender<Vec<u8>>,
 ) -> Result<ReaderExit> {
     let mut session = ClientSessionState::default();
-    while let Some(frame) = input_stream.next().await {
-        let frame = match frame {
-            Ok(frame) => frame,
+    while let Some(message) = input_stream.next().await {
+        let message = match message {
+            Ok(message) => message,
             Err(e) => {
-                warn!(cid, error = ?e, "failed to decode client frame");
+                warn!(cid, error = ?e, "failed to decode rad message");
                 break;
+            }
+        };
+
+        let frame = match message {
+            RadMessage::Lsp(frame) => frame,
+            RadMessage::Control(ControlMessage::StatusRequest) => {
+                let status = ServerStatus {
+                    instances: manager.status().await,
+                };
+                send_to_client(
+                    &to_client,
+                    RadMessage::control(ControlMessage::StatusResponse { status }),
+                )
+                .await;
+                continue;
+            }
+            RadMessage::Control(other) => {
+                warn!(
+                    cid,
+                    ?other,
+                    "ignoring unexpected control message from client"
+                );
+                continue;
             }
         };
 
@@ -261,6 +286,17 @@ async fn make_client_packet_plan(
     })
 }
 
+async fn send_to_client(tx: &Sender<Vec<u8>>, message: RadMessage) {
+    match message.to_bytes() {
+        Ok(bytes) => {
+            let _ = tx.send(bytes).await;
+        }
+        Err(e) => {
+            warn!(error = ?e, "failed to encode rad message");
+        }
+    }
+}
+
 fn build_shutdown_response(packet: &LspFrame) -> Option<Vec<u8>> {
     let request = packet.body.clone();
     let request_obj = request.as_object()?;
@@ -274,7 +310,7 @@ fn build_shutdown_response(packet: &LspFrame) -> Option<Vec<u8>> {
         "id": id,
         "result": null,
     });
-    Some(LspFrame::new(response).to_bytes().unwrap())
+    RadMessage::lsp(LspFrame::new(response)).to_bytes().ok()
 }
 
 fn extract_workspace_key(json: &serde_json::Value) -> Option<String> {

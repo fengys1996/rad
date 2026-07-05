@@ -16,7 +16,73 @@ pub type LspFrameStream<R> = FramedRead<R, LspFrameDecoder>;
 
 const HEADER_DELIMITER: &[u8] = b"\r\n\r\n";
 
-#[derive(Debug, Clone)]
+#[derive(Default, Debug)]
+pub struct LspFrameDecoder;
+
+impl LspFrameDecoder {
+    pub fn decode_packet(&mut self, src: &mut BytesMut) -> Result<Option<LspFrame>> {
+        let Some((_header_end, body_start, total_len)) = decode_frame_bounds(src)? else {
+            return Ok(None);
+        };
+        let body_bytes = src[body_start..total_len].to_vec();
+        src.advance(total_len);
+        let body = serde_json::from_slice(&body_bytes).context(InvalidJsonSnafu)?;
+        Ok(Some(LspFrame::new(body)))
+    }
+}
+
+impl Decoder for LspFrameDecoder {
+    type Item = LspFrame;
+    type Error = Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
+        self.decode_packet(src)
+    }
+}
+
+fn decode_frame_bounds(src: &BytesMut) -> Result<Option<(usize, usize, usize)>> {
+    let Some(header_end) = find_header_end(src.as_ref()) else {
+        return Ok(None);
+    };
+
+    let content_len = parse_content_length(&src[..header_end])?;
+    let body_start = header_end + HEADER_DELIMITER.len();
+    let total_len = body_start + content_len;
+
+    if src.len() < total_len {
+        return Ok(None);
+    }
+
+    Ok(Some((header_end, body_start, total_len)))
+}
+
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(HEADER_DELIMITER.len())
+        .position(|window| window == HEADER_DELIMITER)
+}
+
+fn parse_content_length(headers: &[u8]) -> Result<usize> {
+    let headers = str::from_utf8(headers).context(InvalidHeaderUtf8Snafu)?;
+
+    for line in headers.split("\r\n") {
+        let (name, value) = match line.split_once(':') {
+            Some(parts) => parts,
+            None => continue,
+        };
+
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            let len = value
+                .trim()
+                .parse::<usize>()
+                .context(InvalidContentLengthSnafu)?;
+            return Ok(len);
+        }
+    }
+
+    MissingContentLengthSnafu.fail()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspFrame {
     pub body: Value,
 }
@@ -54,65 +120,6 @@ impl LspFrame {
     pub fn as_json(&self) -> &Value {
         &self.body
     }
-}
-
-#[derive(Default, Debug)]
-pub struct LspFrameDecoder;
-
-impl LspFrameDecoder {
-    pub fn decode_packet(&mut self, src: &mut BytesMut) -> Result<Option<LspFrame>> {
-        let Some(header_end) = find_header_end(src.as_ref()) else {
-            return Ok(None);
-        };
-
-        let content_len = parse_content_length(&src[..header_end])?;
-        let body_start = header_end + HEADER_DELIMITER.len();
-        let total_len = body_start + content_len;
-
-        if src.len() < total_len {
-            return Ok(None);
-        }
-
-        let body_bytes = src[body_start..total_len].to_vec();
-        src.advance(total_len);
-        let body = serde_json::from_slice(&body_bytes).context(InvalidJsonSnafu)?;
-        Ok(Some(LspFrame::new(body)))
-    }
-}
-
-impl Decoder for LspFrameDecoder {
-    type Item = LspFrame;
-    type Error = Error;
-
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
-        self.decode_packet(src)
-    }
-}
-
-fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(HEADER_DELIMITER.len())
-        .position(|window| window == HEADER_DELIMITER)
-}
-
-fn parse_content_length(headers: &[u8]) -> Result<usize> {
-    let headers = str::from_utf8(headers).context(InvalidHeaderUtf8Snafu)?;
-
-    for line in headers.split("\r\n") {
-        let (name, value) = match line.split_once(':') {
-            Some(parts) => parts,
-            None => continue,
-        };
-
-        if name.trim().eq_ignore_ascii_case("content-length") {
-            let len = value
-                .trim()
-                .parse::<usize>()
-                .context(InvalidContentLengthSnafu)?;
-            return Ok(len);
-        }
-    }
-
-    MissingContentLengthSnafu.fail()
 }
 
 #[cfg(test)]

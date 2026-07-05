@@ -1,14 +1,18 @@
 use snafu::ResultExt;
 use tokio::{
-    io::{self, AsyncReadExt, AsyncWriteExt},
+    io::{self, AsyncWriteExt},
     net::{
         TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
 };
+use tokio_stream::StreamExt;
 use tracing::{debug, info, warn};
 
-use crate::error::Result;
+use crate::error::{PlainTextSnafu, Result};
+use crate::protocol::{
+    ControlMessage, LspFrameDecoder, LspFrameStream, RadFrameDecoder, RadFrameStream, RadMessage,
+};
 use crate::{config::DEFAULT_ADDR, error::IoSnafu};
 
 pub struct Options {
@@ -49,52 +53,122 @@ pub async fn run(opts: Options) -> Result<()> {
     Ok(())
 }
 
-async fn stdin_to_server(mut write: OwnedWriteHalf) {
-    let mut stdin = io::stdin();
-    let mut buf = vec![0; 8192];
+pub async fn status(opts: Options) -> Result<()> {
+    let Options { server_addr } = opts;
 
-    loop {
-        let n = match stdin.read(&mut buf).await {
-            Ok(0) => {
-                debug!("stdin reached eof");
+    let stream = TcpStream::connect(&server_addr)
+        .await
+        .with_context(|_| IoSnafu {
+            detail: format!("failed to connect to red server, server addr: {server_addr}"),
+        })?;
+
+    let (read, mut write) = stream.into_split();
+    let request = RadMessage::control(ControlMessage::StatusRequest).to_bytes()?;
+    write.write_all(&request).await?;
+    write.shutdown().await?;
+
+    let mut stream = RadFrameStream::new(read, RadFrameDecoder);
+    let Some(message) = stream.next().await else {
+        return PlainTextSnafu {
+            msg: "rad server closed connection before status response".to_string(),
+        }
+        .fail();
+    };
+
+    match message? {
+        RadMessage::Control(ControlMessage::StatusResponse { status }) => {
+            if status.instances.is_empty() {
+                println!("no lsp instances");
+                return Ok(());
+            }
+
+            println!("workspace\tpid\tclients\tidle_secs\thealthy");
+            for instance in status.instances {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    instance.workspace,
+                    instance.pid,
+                    instance.client_count,
+                    instance.idle_secs,
+                    instance.healthy
+                );
+            }
+            Ok(())
+        }
+        RadMessage::Control(ControlMessage::Error { message }) => {
+            PlainTextSnafu { msg: message }.fail()
+        }
+        RadMessage::Control(ControlMessage::StatusRequest) => PlainTextSnafu {
+            msg: "unexpected status request from rad server".to_string(),
+        }
+        .fail(),
+        RadMessage::Lsp(_) => PlainTextSnafu {
+            msg: "unexpected lsp message from rad server".to_string(),
+        }
+        .fail(),
+    }
+}
+
+async fn stdin_to_server(mut write: OwnedWriteHalf) {
+    let stdin = io::stdin();
+    let mut stream = LspFrameStream::new(stdin, LspFrameDecoder);
+
+    while let Some(frame) = stream.next().await {
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(e) => {
+                warn!(error = ?e, "failed to decode lsp frame from stdin");
                 break;
             }
-            Ok(n) => n,
+        };
+        let bytes = match RadMessage::lsp(frame).to_bytes() {
+            Ok(bytes) => bytes,
             Err(e) => {
-                warn!(error = ?e, "failed to read from stdin");
+                warn!(error = ?e, "failed to encode rad lsp message");
                 break;
             }
         };
 
-        if let Err(e) = write.write_all(&buf[..n]).await {
+        if let Err(e) = write.write_all(&bytes).await {
             warn!(error = ?e, "failed to write to rad server");
             break;
         }
     }
+
+    debug!("stdin reached eof");
 
     if let Err(e) = write.shutdown().await {
         warn!(error = ?e, "failed to shutdown write");
     }
 }
 
-async fn server_to_stdout(mut read: OwnedReadHalf) {
+async fn server_to_stdout(read: OwnedReadHalf) {
     let mut stdout = io::stdout();
-    let mut buf = vec![0; 8192];
+    let mut stream = RadFrameStream::new(read, RadFrameDecoder);
 
-    loop {
-        let n = match read.read(&mut buf).await {
-            Ok(0) => {
-                debug!("rad server closed connection");
-                break;
-            }
-            Ok(n) => n,
+    while let Some(message) = stream.next().await {
+        let message = match message {
+            Ok(message) => message,
             Err(e) => {
-                warn!(error = ?e, "failed to read from rad server");
+                warn!(error = ?e, "failed to read rad message from server");
                 break;
             }
         };
 
-        if let Err(e) = stdout.write_all(&buf[..n]).await {
+        let RadMessage::Lsp(frame) = message else {
+            warn!("ignoring unexpected control message from rad server");
+            continue;
+        };
+
+        let bytes = match frame.to_bytes() {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                warn!(error = ?e, "failed to encode lsp frame for stdout");
+                break;
+            }
+        };
+
+        if let Err(e) = stdout.write_all(&bytes).await {
             warn!(error = ?e, "failed to write to stdout");
             break;
         }
@@ -104,4 +178,6 @@ async fn server_to_stdout(mut read: OwnedReadHalf) {
             break;
         }
     }
+
+    debug!("rad server closed connection");
 }

@@ -32,7 +32,7 @@ use crate::error::{PlainTextSnafu, Result};
 use crate::{config::ProjectConfig, error::IoSnafu};
 use crate::{
     mapper::ReqIdMapper,
-    protocol::{LspFrame, LspFrameDecoder, LspFrameStream},
+    protocol::{InstanceStatus, LspFrame, LspFrameDecoder, LspFrameStream, RadMessage},
 };
 
 const INSTANCE_SEND_TIMEOUT_MS: u64 = 100;
@@ -266,6 +266,28 @@ impl InstanceManager {
         let instance = self.instances.get(key)?;
         instance.build_initialize_response_from_cache(request_id)
     }
+
+    pub async fn status(&self) -> Vec<InstanceStatus> {
+        let instances = self
+            .instances
+            .iter()
+            .map(|entry| (entry.key().workspace().to_string(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        let now = now_ts();
+        let mut statuses = Vec::with_capacity(instances.len());
+
+        for (workspace, instance) in instances {
+            statuses.push(InstanceStatus {
+                workspace,
+                pid: instance.pid,
+                client_count: instance.clients.len(),
+                idle_secs: now - instance.last_used.load(Ordering::Relaxed),
+                healthy: instance.is_healthy().await,
+            });
+        }
+
+        statuses
+    }
 }
 
 /// A client-session scoped reference to an already-bound LSP instance.
@@ -445,8 +467,10 @@ impl Instance {
     }
 
     fn build_initialize_response_from_cache(&self, request_id: Value) -> Option<Vec<u8>> {
-        self.req_id_mapper
-            .initialize_response_from_cache(request_id)
+        let frame = self
+            .req_id_mapper
+            .initialize_response_from_cache(request_id)?;
+        RadMessage::lsp(frame).to_bytes().ok()
     }
 }
 
@@ -643,13 +667,25 @@ async fn forward_ra_to_active_client(
                         };
 
                         if routed.client_id == 0 {
-                            warn!(pid, bytes = routed.bytes.len(), "dropping packet without active client");
+                            warn!(pid, "dropping packet without active client");
                             continue;
                         }
 
                         let client_tx = clients.get(&routed.client_id).map(|client| client.tx.clone());
                         if let Some(tx) = client_tx {
-                            if let Err(err) = tx.send(routed.bytes).await {
+                            let bytes = match RadMessage::lsp(routed.frame).to_bytes() {
+                                Ok(bytes) => bytes,
+                                Err(err) => {
+                                    error!(
+                                        pid,
+                                        client_id = routed.client_id,
+                                        error = ?err,
+                                        "failed to encode rad lsp message"
+                                    );
+                                    continue;
+                                }
+                            };
+                            if let Err(err) = tx.send(bytes).await {
                                 error!(
                                     pid,
                                     client_id = routed.client_id,
@@ -736,10 +772,7 @@ mod tests {
             .expect("valid response json"),
         );
         let routed = req_id_mapper.rewrite_ra_packet(resp, 9, 100).unwrap();
-        let resp_packet = decode_single_packet(&routed.bytes)
-            .unwrap()
-            .expect("rewritten response packet should parse");
-        let resp_json = resp_packet.as_json();
+        let resp_json = routed.frame.as_json();
 
         assert_eq!(routed.client_id, 3);
         assert_eq!(resp_json["id"], Value::Number(1.into()));
