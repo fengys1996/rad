@@ -9,7 +9,7 @@ on:
       - main
 
 env:
-  RUST_TOOLCHAIN: "1.98"
+  RUST_TOOLCHAIN: "1.98.1"
 
 jobs:
   cargo:
