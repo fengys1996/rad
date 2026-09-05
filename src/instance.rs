@@ -6,7 +6,7 @@ use std::{
     process::Stdio,
     sync::{
         Arc,
-        atomic::{AtomicI64, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -166,13 +166,21 @@ async fn reap_idle_instances(
     for entry in instances.iter() {
         let instance = entry.value();
         let inactive_secs = now - instance.last_used.load(Ordering::Relaxed);
-        if instance.clients.is_empty() && inactive_secs >= idle_timeout_secs {
+        if !instance.pinned.load(Ordering::Relaxed)
+            && instance.clients.is_empty()
+            && inactive_secs >= idle_timeout_secs
+        {
             to_remove.push((entry.key().clone(), instance.clone(), inactive_secs));
         }
     }
 
     for (key, instance, inactive_secs) in to_remove {
-        if instances.remove(&key).is_some() {
+        if instances
+            .remove_if(&key, |_, current| {
+                !current.pinned.load(Ordering::Relaxed) && current.clients.is_empty()
+            })
+            .is_some()
+        {
             info!(
                 workspace = %key.workspace,
                 pid = instance.pid,
@@ -287,6 +295,7 @@ impl InstanceManager {
                 client_count: instance.clients.len(),
                 idle_secs: now - instance.last_used.load(Ordering::Relaxed),
                 healthy: instance.is_healthy().await,
+                pinned: instance.pinned.load(Ordering::Relaxed),
             });
         }
 
@@ -297,12 +306,20 @@ impl InstanceManager {
         let to_clear: Vec<(InstanceKey, InstanceRef)> = self
             .instances
             .iter()
-            .filter(|entry| entry.value().clients.is_empty())
+            .filter(|entry| {
+                entry.value().clients.is_empty() && !entry.value().pinned.load(Ordering::Relaxed)
+            })
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
         let mut cleared = Vec::with_capacity(to_clear.len());
         for (key, instance) in to_clear {
-            if self.instances.remove(&key).is_some() {
+            if self
+                .instances
+                .remove_if(&key, |_, current| {
+                    !current.pinned.load(Ordering::Relaxed) && current.clients.is_empty()
+                })
+                .is_some()
+            {
                 info!(
                     workspace = %key.workspace,
                     pid = instance.pid,
@@ -316,6 +333,15 @@ impl InstanceManager {
             }
         }
         cleared
+    }
+
+    pub fn set_pinned(&self, pid: u32, pinned: bool) -> bool {
+        let Some(instance) = self.instances.iter().find(|entry| entry.value().pid == pid) else {
+            return false;
+        };
+
+        instance.pinned.store(pinned, Ordering::Relaxed);
+        true
     }
 
     pub async fn clear_all(&self) -> Vec<ClearedInstance> {
@@ -384,6 +410,7 @@ struct Instance {
     last_used: Arc<AtomicI64>,
     active_client_id: Arc<AtomicU32>,
     clients: Arc<DashMap<u32, ClientHandle>>,
+    pinned: AtomicBool,
     req_id_mapper: ReqIdMapper,
 }
 
@@ -455,6 +482,7 @@ impl Instance {
             last_used,
             active_client_id,
             clients,
+            pinned: AtomicBool::new(false),
             req_id_mapper,
         })
     }

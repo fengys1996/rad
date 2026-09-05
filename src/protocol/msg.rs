@@ -125,6 +125,8 @@ pub enum ControlMessage {
     StatusResponse { status: ServerStatus },
     ClearRequest { force: bool },
     ClearResponse { cleared: Vec<ClearedInstance> },
+    PinRequest { pid: u32, pinned: bool },
+    PinResponse { pid: u32, pinned: bool },
     Error { message: String },
 }
 
@@ -146,6 +148,7 @@ pub struct InstanceStatus {
     pub client_count: usize,
     pub idle_secs: i64,
     pub healthy: bool,
+    pub pinned: bool,
 }
 
 #[cfg(test)]
@@ -170,6 +173,21 @@ mod tests {
     #[test]
     fn round_trips_control_message() {
         let message = RadMessage::control(ControlMessage::StatusRequest);
+        let bytes = message.to_bytes().unwrap();
+        let decoded = RadFrameCocdec
+            .decode_packet(&mut BytesMut::from(bytes.as_slice()))
+            .unwrap()
+            .expect("message should decode");
+
+        assert_eq!(message, decoded);
+    }
+
+    #[test]
+    fn round_trips_pin_message() {
+        let message = RadMessage::control(ControlMessage::PinRequest {
+            pid: 123,
+            pinned: true,
+        });
         let bytes = message.to_bytes().unwrap();
         let decoded = RadFrameCocdec
             .decode_packet(&mut BytesMut::from(bytes.as_slice()))

@@ -124,12 +124,14 @@ workspace: file:///home/user/greptimedb
   pid:      12345
   clients:  2
   idle:     1m 15s
+  pinned:   yes
   healthy:  yes
 
 workspace: file:///home/user/rad
   pid:      67890
   clients:  0
   idle:     5m 30s
+  pinned:   no
   healthy:  yes
 ```
 
@@ -152,3 +154,21 @@ Example output:
 ```
 file:///home/user/rad (pid: 67890)
 ```
+
+### rad pin
+
+Prevent an LSP instance from being removed when it is idle:
+
+```bash
+rad pin 12345
+```
+
+Remove the pin:
+
+```bash
+rad pin -r 12345
+```
+
+Use `rad status` to find the instance PID and check its pin state. Pinned
+instances are skipped by `rad clean`, but can still be removed with
+`rad clean -f`.

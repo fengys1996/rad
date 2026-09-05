@@ -57,7 +57,7 @@ pub struct Args {
     name = "rad",
     about = "rust-analyzer daemon",
     disable_help_subcommand = true,
-    override_usage = "rad [server|client|status|clean] [options]"
+    override_usage = "rad [server|client|status|clean|pin] [options]"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -116,6 +116,14 @@ pub enum Mode {
     Clean {
         #[arg(short, long)]
         force: bool,
+    },
+    #[command(about = "Pin or unpin an LSP instance by PID")]
+    Pin {
+        #[arg(short = 'r', long = "remove")]
+        remove: bool,
+
+        #[arg(value_name = "pid")]
+        pid: u32,
     },
 }
 
@@ -204,6 +212,32 @@ mod tests {
         let args = parse_args_from(["rad", "clean", "-f"]);
 
         assert_eq!(Some(Mode::Clean { force: true }), args.mode);
+    }
+
+    #[test]
+    fn parses_pin_mode() {
+        let args = parse_args_from(["rad", "pin", "123"]);
+
+        assert_eq!(
+            Some(Mode::Pin {
+                remove: false,
+                pid: 123,
+            }),
+            args.mode
+        );
+    }
+
+    #[test]
+    fn parses_pin_mode_remove() {
+        let args = parse_args_from(["rad", "pin", "-r", "123"]);
+
+        assert_eq!(
+            Some(Mode::Pin {
+                remove: true,
+                pid: 123,
+            }),
+            args.mode
+        );
     }
 
     #[test]
