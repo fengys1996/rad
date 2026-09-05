@@ -4,41 +4,18 @@ use std::sync::{
 };
 
 use dashmap::DashMap;
-use serde_json::{Map, Number, Value};
 use tracing::debug;
 
 use crate::error::Result;
+use crate::protocol::lsp::JsonRpcId;
 use crate::protocol::{ClientId, LspFrame};
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum JsonRpcId {
-    Number(i64),
-    String(String),
-}
-
-impl JsonRpcId {
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::Number(num) => num.as_i64().map(Self::Number),
-            Value::String(s) => Some(Self::String(s.clone())),
-            _ => None,
-        }
-    }
-
-    fn to_value(&self) -> Value {
-        match self {
-            Self::Number(n) => Value::Number(Number::from(*n)),
-            Self::String(s) => Value::String(s.clone()),
-        }
-    }
-}
 
 #[derive(Clone)]
 pub(crate) struct ReqIdMapper {
     next_global_id: Arc<AtomicU64>,
     global_to_client: Arc<DashMap<JsonRpcId, PendingReq>>,
     client_to_global: Arc<DashMap<(ClientId, JsonRpcId), JsonRpcId>>,
-    init_resp_cache: Arc<RwLock<Option<Value>>>,
+    init_resp_cache: Arc<RwLock<Option<LspFrame>>>,
 }
 
 #[derive(Clone)]
@@ -64,33 +41,25 @@ impl ReqIdMapper {
         mut packet: LspFrame,
         pid: u32,
     ) -> LspFrame {
-        let Some(obj) = packet.body.as_object_mut() else {
-            return packet;
-        };
-
-        self.remap_req_id(cid, obj, pid);
-        self.remap_cancel_req(cid, obj, pid);
+        self.remap_req_id(cid, &mut packet, pid);
+        self.remap_cancel_req(cid, &mut packet, pid);
 
         packet
     }
 
-    fn remap_req_id(&self, cid: u32, obj: &mut Map<String, Value>, pid: u32) {
-        if !is_req(obj) {
+    fn remap_req_id(&self, cid: u32, packet: &mut LspFrame, pid: u32) {
+        if !packet.is_request() {
             return;
         }
 
-        let Some(raw_req_id) = obj.get("id").and_then(JsonRpcId::from_value) else {
+        let Some(raw_req_id) = packet.id() else {
             return;
         };
 
         let global_raw = self.next_global_id.fetch_add(1, Ordering::Relaxed) as i64;
         let global_id = JsonRpcId::Number(global_raw);
 
-        let method = obj
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+        let method = packet.method().unwrap_or_default().to_string();
         let req = PendingReq {
             client_id: cid,
             raw_req_id: raw_req_id.clone(),
@@ -101,7 +70,7 @@ impl ReqIdMapper {
         self.client_to_global
             .insert((cid, raw_req_id.clone()), global_id.clone());
 
-        obj.insert("id".to_string(), global_id.to_value());
+        packet.set_id(global_id);
 
         debug!(
             pid,
@@ -112,21 +81,8 @@ impl ReqIdMapper {
         );
     }
 
-    fn remap_cancel_req(&self, client_id: u32, obj: &mut Map<String, Value>, pid: u32) {
-        let Some(Value::String(method)) = obj.get("method") else {
-            return;
-        };
-
-        if method != "$/cancelRequest" {
-            return;
-        }
-
-        let Some(cancel_id) = obj
-            .get("params")
-            .and_then(Value::as_object)
-            .and_then(|params| params.get("id"))
-            .and_then(JsonRpcId::from_value)
-        else {
+    fn remap_cancel_req(&self, client_id: u32, packet: &mut LspFrame, pid: u32) {
+        let Some(cancel_id) = packet.cancel_request_id() else {
             return;
         };
 
@@ -144,9 +100,7 @@ impl ReqIdMapper {
             return;
         };
 
-        if let Some(params) = obj.get_mut("params").and_then(Value::as_object_mut) {
-            params.insert("id".to_string(), global_id.to_value());
-        }
+        packet.set_cancel_request_id(global_id.clone());
 
         debug!(
             pid,
@@ -163,31 +117,21 @@ impl ReqIdMapper {
         active_client_id: u32,
         pid: u32,
     ) -> Result<RoutedPacket> {
-        let mut json = packet.body.clone();
-
-        let Some(obj) = json.as_object_mut() else {
-            return Ok(RoutedPacket {
-                client_id: active_client_id,
-                frame: packet,
-            });
-        };
-
-        if is_resp(obj)
-            && let Some(global_id) = obj.get("id").and_then(JsonRpcId::from_value)
+        if packet.is_response()
+            && let Some(global_id) = packet.id()
             && let Some((_, pending)) = self.global_to_client.remove(&global_id)
         {
             if pending.method == "initialize"
-                && let Some(result) = obj.get("result").cloned()
+                && packet.is_success_response()
                 && let Ok(mut slot) = self.init_resp_cache.write()
             {
-                *slot = Some(result);
+                *slot = Some(packet.clone());
             }
 
             self.client_to_global
                 .remove(&(pending.client_id, pending.raw_req_id.clone()));
-            obj.insert("id".to_string(), pending.raw_req_id.to_value());
-
-            let frame = LspFrame::new(json);
+            let mut frame = packet;
+            frame.set_id(pending.raw_req_id.clone());
 
             debug!(
                 pid,
@@ -209,28 +153,14 @@ impl ReqIdMapper {
         })
     }
 
-    pub(crate) fn initialize_response_from_cache(&self, request_id: Value) -> Option<LspFrame> {
-        let result = self.init_resp_cache.read().ok()?.clone()?;
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": result,
-        });
-        let body = serde_json::to_vec(&response).ok()?;
-        let json: Value = serde_json::from_slice(&body).ok()?;
-        Some(LspFrame::new(json))
+    pub(crate) fn initialize_response_from_cache(&self, id: JsonRpcId) -> Option<LspFrame> {
+        let mut response = self.init_resp_cache.read().ok()?.clone()?;
+        response.set_id(id);
+        Some(response)
     }
 }
 
 pub(crate) struct RoutedPacket {
     pub(crate) client_id: u32,
     pub(crate) frame: LspFrame,
-}
-
-fn is_req(obj: &Map<String, Value>) -> bool {
-    obj.contains_key("method") && obj.contains_key("id")
-}
-
-fn is_resp(obj: &Map<String, Value>) -> bool {
-    obj.contains_key("id") && (obj.contains_key("result") || obj.contains_key("error"))
 }

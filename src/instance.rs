@@ -13,6 +13,7 @@ use std::{
 
 use bytes::BytesMut;
 use dashmap::DashMap;
+#[cfg(test)]
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 use tokio::{
@@ -34,6 +35,7 @@ use crate::{
     mapper::ReqIdMapper,
     protocol::{
         ClearedInstance, InstanceStatus, LspFrame, LspFrameDecoder, LspFrameStream, LspSender,
+        lsp::JsonRpcId,
     },
 };
 
@@ -260,13 +262,13 @@ impl InstanceManager {
         ))
     }
 
-    pub fn build_initialize_response_from_cache(
+    pub(crate) fn build_initialize_response_from_cache(
         &self,
         key: &InstanceKey,
-        request_id: Value,
+        id: JsonRpcId,
     ) -> Option<LspFrame> {
         let instance = self.instances.get(key)?;
-        instance.build_initialize_response_from_cache(request_id)
+        instance.build_initialize_response_from_cache(id)
     }
 
     pub async fn status(&self) -> Vec<InstanceStatus> {
@@ -517,9 +519,8 @@ impl Instance {
         }
     }
 
-    fn build_initialize_response_from_cache(&self, request_id: Value) -> Option<LspFrame> {
-        self.req_id_mapper
-            .initialize_response_from_cache(request_id)
+    fn build_initialize_response_from_cache(&self, id: JsonRpcId) -> Option<LspFrame> {
+        self.req_id_mapper.initialize_response_from_cache(id)
     }
 }
 

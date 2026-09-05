@@ -161,8 +161,9 @@ async fn do_process_lsp_frame(
 
     if session.instance_key.is_none() {
         // Bind the client to a per-workspace instance on the first packet we can identify.
-        session.workspace_label =
-            extract_workspace_key(&frame.body).unwrap_or_else(|| "default-workspace".to_string());
+        session.workspace_label = frame
+            .workspace_key()
+            .unwrap_or_else(|| "default-workspace".to_string());
         let key = InstanceKey::new(session.workspace_label.clone());
         let (handle, reused) = manager.spawn_instance(cid, to_client.clone(), &key).await?;
         session.instance_key = Some(key);
@@ -184,8 +185,8 @@ async fn do_process_lsp_frame(
     // instead of replaying a second initialize into rust-analyzer.
     if session.reusing_existing_instance
         && frame.is_request_method("initialize")
-        && let Some(request_id) = extract_request_id(&frame)
-        && let Some(resp) = manager.build_initialize_response_from_cache(&key, request_id)
+        && let Some(id) = frame.id()
+        && let Some(resp) = manager.build_initialize_response_from_cache(&key, id)
     {
         session.initialize_replied_from_cache = true;
         debug!(cid, workspace = %session.workspace_label, "replying initialize from cached capabilities");
@@ -205,9 +206,7 @@ async fn do_process_lsp_frame(
     }
 
     // Handle shutdown locally so we can let the shared backend instance keep running.
-    if frame.is_request_method("shutdown")
-        && let Some(resp) = build_shutdown_response(&frame)
-    {
+    if let Some(resp) = frame.shutdown_response() {
         debug!(cid, workspace = %session.workspace_label, "replying shutdown locally for shared instance");
         // TODO: use error handle, instead of ignore.
         let _ = to_client.send(resp).await;
@@ -256,56 +255,6 @@ where
     }
 }
 
-fn build_shutdown_response(packet: &LspFrame) -> Option<LspFrame> {
-    let request = packet.body.clone();
-    let request_obj = request.as_object()?;
-    if request_obj.get("method")?.as_str()? != "shutdown" {
-        return None;
-    }
-
-    let id = request_obj.get("id")?.clone();
-    let response = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": null,
-    });
-    Some(LspFrame::new(response))
-}
-
-fn extract_workspace_key(json: &serde_json::Value) -> Option<String> {
-    let method = json.get("method")?.as_str()?;
-
-    if method != "initialize" {
-        return None;
-    }
-
-    let params = json.get("params")?;
-
-    if let Some(uri) = params
-        .get("workspaceFolders")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|items| items.first())
-        .and_then(|item| item.get("uri"))
-        .and_then(serde_json::Value::as_str)
-    {
-        return Some(uri.to_string());
-    }
-
-    if let Some(uri) = params.get("rootUri").and_then(serde_json::Value::as_str)
-        && !uri.is_empty()
-    {
-        return Some(uri.to_string());
-    }
-
-    if let Some(path) = params.get("rootPath").and_then(serde_json::Value::as_str)
-        && !path.is_empty()
-    {
-        return Some(path.to_string());
-    }
-
-    None
-}
-
 struct ClientSessionState {
     instance_key: Option<InstanceKey>,
     instance_handle: Option<InstanceHandle>,
@@ -324,8 +273,4 @@ impl Default for ClientSessionState {
             initialize_replied_from_cache: false,
         }
     }
-}
-
-fn extract_request_id(packet: &LspFrame) -> Option<serde_json::Value> {
-    packet.body.get("id").cloned()
 }

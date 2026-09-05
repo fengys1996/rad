@@ -23,7 +23,7 @@ impl Encoder<RadMessage> for RadFrameCocdec {
     fn encode(&mut self, item: RadMessage, dst: &mut BytesMut) -> Result<()> {
         let (kind, body) = match item {
             RadMessage::Lsp(frame) => {
-                let body = serde_json::to_vec(&frame.body).context(InvalidJsonSnafu)?;
+                let body = frame.to_json_bytes()?;
                 (KIND_LSP, body)
             }
             RadMessage::Control(message) => {
@@ -81,8 +81,8 @@ impl RadFrameCocdec {
 
         match kind {
             KIND_LSP => {
-                let body = serde_json::from_slice(&body).context(InvalidJsonSnafu)?;
-                Ok(Some(RadMessage::Lsp(LspFrame::new(body))))
+                let frame = LspFrame::from_json_bytes(&body)?;
+                Ok(Some(RadMessage::Lsp(frame)))
             }
             KIND_CONTROL => {
                 let message = serde_json::from_slice(&body).context(InvalidJsonSnafu)?;
