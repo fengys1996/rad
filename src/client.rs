@@ -36,7 +36,7 @@ pub async fn run(opts: Options) -> Result<()> {
     let stream = TcpStream::connect(&server_addr)
         .await
         .with_context(|_| IoSnafu {
-            detail: format!("failed to connect to red server, server addr: {server_addr}"),
+            detail: format!("failed to connect to rad server, server addr: {server_addr}"),
         })?;
 
     info!(server_addr, "client proxy connected to rad server");
@@ -62,7 +62,7 @@ pub async fn status(opts: Options) -> Result<()> {
     let stream = TcpStream::connect(&server_addr)
         .await
         .with_context(|_| IoSnafu {
-            detail: format!("failed to connect to red server, server addr: {server_addr}"),
+            detail: format!("failed to connect to rad server, server addr: {server_addr}"),
         })?;
 
     let msg = RadMessage::control(ControlMessage::StatusRequest);
@@ -95,7 +95,7 @@ pub async fn status(opts: Options) -> Result<()> {
         | RadMessage::Control(ControlMessage::ClearResponse { .. })
         | RadMessage::Control(ControlMessage::PinRequest { .. })
         | RadMessage::Control(ControlMessage::PinResponse { .. }) => PlainTextSnafu {
-            msg: "unexpected clear message from rad server".to_string(),
+            msg: "unexpected control message from rad server".to_string(),
         }
         .fail(),
         RadMessage::Lsp(_) => PlainTextSnafu {
@@ -111,7 +111,7 @@ pub async fn clean(opts: Options, force: bool) -> Result<()> {
     let stream = TcpStream::connect(&server_addr)
         .await
         .with_context(|_| IoSnafu {
-            detail: format!("failed to connect to red server, server addr: {server_addr}"),
+            detail: format!("failed to connect to rad server, server addr: {server_addr}"),
         })?;
 
     let msg = RadMessage::control(ControlMessage::ClearRequest { force });
@@ -165,7 +165,7 @@ pub async fn pin(opts: Options, pid: u32, pinned: bool) -> Result<()> {
     let stream = TcpStream::connect(&server_addr)
         .await
         .with_context(|_| IoSnafu {
-            detail: format!("failed to connect to red server, server addr: {server_addr}"),
+            detail: format!("failed to connect to rad server, server addr: {server_addr}"),
         })?;
 
     let (r, w) = stream.into_split();

@@ -875,4 +875,84 @@ mod tests {
             paths
         );
     }
+
+    #[tokio::test]
+    async fn set_pinned_toggles_known_instance_and_rejects_unknown() {
+        let manager = empty_manager().await;
+
+        assert!(!manager.set_pinned(u32::MAX, true));
+
+        let instance = spawn_test_instance();
+        manager
+            .instances
+            .insert(InstanceKey::new("file:///pinned"), instance.clone());
+
+        assert!(manager.set_pinned(instance.pid, true));
+        assert!(instance.pinned.load(Ordering::Relaxed));
+        assert!(manager.set_pinned(instance.pid, false));
+        assert!(!instance.pinned.load(Ordering::Relaxed));
+
+        instance.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reap_idle_instances_skips_pinned() {
+        let pinned = spawn_test_instance();
+        let idle = spawn_test_instance();
+        pinned.pinned.store(true, Ordering::Relaxed);
+
+        let instances = Arc::new(DashMap::new());
+        instances.insert(InstanceKey::new("file:///pinned"), pinned.clone());
+        instances.insert(InstanceKey::new("file:///idle"), idle.clone());
+
+        reap_idle_instances(&instances, 0).await;
+
+        assert!(instances.contains_key(&InstanceKey::new("file:///pinned")));
+        assert!(!instances.contains_key(&InstanceKey::new("file:///idle")));
+
+        pinned.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn clear_idle_skips_pinned() {
+        let manager = empty_manager().await;
+
+        let pinned = spawn_test_instance();
+        let idle = spawn_test_instance();
+        pinned.pinned.store(true, Ordering::Relaxed);
+        manager
+            .instances
+            .insert(InstanceKey::new("file:///pinned"), pinned.clone());
+        manager
+            .instances
+            .insert(InstanceKey::new("file:///idle"), idle.clone());
+
+        let cleared = manager.clear_idle().await;
+
+        assert_eq!(1, cleared.len());
+        assert_eq!("file:///idle", cleared[0].workspace);
+        assert!(manager.instances.contains_key(&InstanceKey::new("file:///pinned")));
+
+        pinned.shutdown().await;
+    }
+
+    /// Spawns a long-lived dummy process (`cat`, which blocks reading stdin) as
+    /// a stand-in for a real LSP server so reaping logic can be exercised
+    /// without requiring rust-analyzer to be installed.
+    fn spawn_test_instance() -> InstanceRef {
+        Arc::new(Instance::new(Path::new("cat"), &[], None).unwrap())
+    }
+
+    async fn empty_manager() -> InstanceManager {
+        // Poll every hour so the background reaper never fires during a test.
+        InstanceManager::new(
+            Duration::from_secs(3600),
+            Duration::from_secs(3600),
+            None,
+            vec![],
+            HashMap::new(),
+        )
+        .await
+        .unwrap()
+    }
 }
