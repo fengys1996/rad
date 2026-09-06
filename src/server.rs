@@ -131,6 +131,9 @@ where
             RadMessage::Control(ControlMessage::ClearRequest { force }) => {
                 process_clear(ctx, force).await
             }
+            RadMessage::Control(ControlMessage::PinRequest { pid, pinned }) => {
+                process_pin(ctx, pid, pinned).await
+            }
             _ => process_unsupported(ctx).await,
         }
     }
@@ -240,6 +243,17 @@ async fn process_clear(ctx: &Context, force: bool) {
             cleared,
         }))
         .await;
+}
+
+async fn process_pin(ctx: &Context, pid: u32, pinned: bool) {
+    let response = if ctx.instance_manager.set_pinned(pid, pinned) {
+        ControlMessage::PinResponse { pid, pinned }
+    } else {
+        ControlMessage::Error {
+            message: format!("lsp instance not found: {pid}"),
+        }
+    };
+    let _ = ctx.to_client.send(RadMessage::control(response)).await;
 }
 
 async fn forward_instance_to_client<W>(c_id: u32, mut w: W, mut instance_out: Receiver<RadMessage>)

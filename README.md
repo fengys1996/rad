@@ -29,6 +29,7 @@ It also allows multiple editors opening the same workspace to reuse a single
 
 - Reuse existing rust-analyzer instance for the same workspace.
 - Keep rust-analyzer alive when clients disconnect; idle reaper shuts it down after a configurable timeout.
+- Pin a running instance by PID to exempt it from idle shutdown (see `rad pin`).
 - Start rust-analyzer in the workspace directory to respect each project's Rust toolchain.
 
 ## Configuration
@@ -124,24 +125,30 @@ workspace: file:///home/user/greptimedb
   pid:      12345
   clients:  2
   idle:     1m 15s
+  pinned:   yes
   healthy:  yes
 
 workspace: file:///home/user/rad
   pid:      67890
   clients:  0
   idle:     5m 30s
+  pinned:   no
   healthy:  yes
 ```
 
 ### rad clean
 
-Remove idle instances (no attached clients):
+`rad clean` shuts down idle instances, i.e. instances with no attached
+clients that are not pinned (see `rad pin`). Pinned instances are kept even
+when idle:
 
 ```bash
 rad clean
 ```
 
-Remove all instances, regardless of client count:
+`rad clean -f` skips all checks and removes every instance, regardless of
+pin state or attached clients. Instances currently serving clients are shut
+down as well, so use it with care:
 
 ```bash
 rad clean -f
@@ -152,3 +159,21 @@ Example output:
 ```
 file:///home/user/rad (pid: 67890)
 ```
+
+### rad pin
+
+Prevent an LSP instance from being removed when it is idle:
+
+```bash
+rad pin 12345
+```
+
+Remove the pin:
+
+```bash
+rad pin -r 12345
+```
+
+Use `rad status` to find the instance PID and check its pin state. Pinned
+instances are skipped by `rad clean`, but can still be removed with
+`rad clean -f`.

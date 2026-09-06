@@ -36,7 +36,7 @@ pub async fn run(opts: Options) -> Result<()> {
     let stream = TcpStream::connect(&server_addr)
         .await
         .with_context(|_| IoSnafu {
-            detail: format!("failed to connect to red server, server addr: {server_addr}"),
+            detail: format!("failed to connect to rad server, server addr: {server_addr}"),
         })?;
 
     info!(server_addr, "client proxy connected to rad server");
@@ -62,7 +62,7 @@ pub async fn status(opts: Options) -> Result<()> {
     let stream = TcpStream::connect(&server_addr)
         .await
         .with_context(|_| IoSnafu {
-            detail: format!("failed to connect to red server, server addr: {server_addr}"),
+            detail: format!("failed to connect to rad server, server addr: {server_addr}"),
         })?;
 
     let msg = RadMessage::control(ControlMessage::StatusRequest);
@@ -92,8 +92,10 @@ pub async fn status(opts: Options) -> Result<()> {
         }
         .fail(),
         RadMessage::Control(ControlMessage::ClearRequest { .. })
-        | RadMessage::Control(ControlMessage::ClearResponse { .. }) => PlainTextSnafu {
-            msg: "unexpected clear message from rad server".to_string(),
+        | RadMessage::Control(ControlMessage::ClearResponse { .. })
+        | RadMessage::Control(ControlMessage::PinRequest { .. })
+        | RadMessage::Control(ControlMessage::PinResponse { .. }) => PlainTextSnafu {
+            msg: "unexpected control message from rad server".to_string(),
         }
         .fail(),
         RadMessage::Lsp(_) => PlainTextSnafu {
@@ -109,7 +111,7 @@ pub async fn clean(opts: Options, force: bool) -> Result<()> {
     let stream = TcpStream::connect(&server_addr)
         .await
         .with_context(|_| IoSnafu {
-            detail: format!("failed to connect to red server, server addr: {server_addr}"),
+            detail: format!("failed to connect to rad server, server addr: {server_addr}"),
         })?;
 
     let msg = RadMessage::control(ControlMessage::ClearRequest { force });
@@ -145,8 +147,56 @@ pub async fn clean(opts: Options, force: bool) -> Result<()> {
         }
         .fail(),
         RadMessage::Control(ControlMessage::ClearRequest { .. })
-        | RadMessage::Control(ControlMessage::StatusRequest) => PlainTextSnafu {
+        | RadMessage::Control(ControlMessage::StatusRequest)
+        | RadMessage::Control(ControlMessage::PinRequest { .. })
+        | RadMessage::Control(ControlMessage::PinResponse { .. }) => PlainTextSnafu {
             msg: "unexpected request from rad server".to_string(),
+        }
+        .fail(),
+        RadMessage::Lsp(_) => PlainTextSnafu {
+            msg: "unexpected lsp message from rad server".to_string(),
+        }
+        .fail(),
+    }
+}
+
+pub async fn pin(opts: Options, pid: u32, pinned: bool) -> Result<()> {
+    let server_addr = opts.server_addr;
+    let stream = TcpStream::connect(&server_addr)
+        .await
+        .with_context(|_| IoSnafu {
+            detail: format!("failed to connect to rad server, server addr: {server_addr}"),
+        })?;
+
+    let (r, w) = stream.into_split();
+    let mut sink = FramedWrite::new(w, RadFrameCocdec);
+    sink.send(RadMessage::control(ControlMessage::PinRequest {
+        pid,
+        pinned,
+    }))
+    .await?;
+
+    let mut stream = FramedRead::new(r, RadFrameCocdec);
+    let Some(msg) = stream.next().await else {
+        return PlainTextSnafu {
+            msg: "rad server closed connection before pin response",
+        }
+        .fail();
+    };
+
+    match msg? {
+        RadMessage::Control(ControlMessage::PinResponse { pid, pinned }) => {
+            println!(
+                "{} instance {pid}",
+                if pinned { "pinned" } else { "unpinned" }
+            );
+            Ok(())
+        }
+        RadMessage::Control(ControlMessage::Error { message }) => {
+            PlainTextSnafu { msg: message }.fail()
+        }
+        RadMessage::Control(_) => PlainTextSnafu {
+            msg: "unexpected control message from rad server".to_string(),
         }
         .fail(),
         RadMessage::Lsp(_) => PlainTextSnafu {
@@ -179,11 +229,12 @@ fn format_status(mut status: ServerStatus) -> String {
 
 fn format_instance_status(instance: &InstanceStatus) -> String {
     format!(
-        "workspace: {}\n  pid:      {}\n  clients:  {}\n  idle:     {}\n  healthy:  {}\n",
+        "workspace: {}\n  pid:      {}\n  clients:  {}\n  idle:     {}\n  pinned:   {}\n  healthy:  {}\n",
         instance.workspace,
         instance.pid,
         instance.client_count,
         format_duration_secs(instance.idle_secs),
+        if instance.pinned { "yes" } else { "no" },
         if instance.healthy { "yes" } else { "no" },
     )
 }
@@ -301,6 +352,7 @@ mod tests {
                     client_count: 2,
                     idle_secs: 75,
                     healthy: false,
+                    pinned: true,
                 },
                 InstanceStatus {
                     workspace: "file:///a".to_string(),
@@ -308,6 +360,7 @@ mod tests {
                     client_count: 1,
                     idle_secs: 5,
                     healthy: true,
+                    pinned: false,
                 },
             ],
         };
@@ -318,12 +371,14 @@ mod tests {
                 "  pid:      10\n",
                 "  clients:  1\n",
                 "  idle:     5s\n",
+                "  pinned:   no\n",
                 "  healthy:  yes\n",
                 "\n",
                 "workspace: file:///z\n",
                 "  pid:      20\n",
                 "  clients:  2\n",
                 "  idle:     1m 15s\n",
+                "  pinned:   yes\n",
                 "  healthy:  no\n",
             ),
             format_status(status)

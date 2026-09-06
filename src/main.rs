@@ -61,6 +61,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
             guard
         }
+        Mode::Pin { remove, pid } => {
+            let guard = init_logging(default_client_options());
+            client::pin(
+                client::Options {
+                    server_addr: config.listen_addr(),
+                },
+                pid,
+                !remove,
+            )
+            .await?;
+            guard
+        }
     };
     Ok(())
 }
