@@ -138,8 +138,8 @@ fn ensure_absolute_path(name: &str, path: &Path) -> Result<()> {
 /// Spawns the background task that reaps idle LSP instances.
 ///
 /// Checks all instances on the given interval. An instance is reaped when
-/// it has no attached clients and has been idle for at least the configured
-/// timeout.
+/// it has no attached clients and either its backing process has exited, or
+/// it has been idle for at least the configured timeout and is not pinned.
 async fn spawn_instance_reaper(
     instances: Arc<DashMap<InstanceKey, InstanceRef>>,
     instance_timeout: Duration,
@@ -156,36 +156,57 @@ async fn spawn_instance_reaper(
     });
 }
 
+/// Why an instance is eligible for reaping.
+#[derive(Clone, Copy, Debug)]
+enum ReapReason {
+    /// The backing process has exited; pinned state is ignored.
+    Dead,
+    /// The instance is healthy but idle past the timeout and not pinned.
+    Idle,
+}
+
 async fn reap_idle_instances(
     instances: &DashMap<InstanceKey, InstanceRef>,
     idle_timeout_secs: i64,
 ) {
     let now = now_ts();
-    let mut to_remove = Vec::new();
 
-    for entry in instances.iter() {
-        let instance = entry.value();
+    // Snapshot entries up front so health checks don't hold DashMap shard
+    // locks across .await points.
+    let candidates: Vec<(InstanceKey, InstanceRef)> = instances
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.value().clone()))
+        .collect();
+
+    let mut to_remove = Vec::new();
+    for (key, instance) in candidates {
         let inactive_secs = now - instance.last_used.load(Ordering::Relaxed);
-        if !instance.pinned.load(Ordering::Relaxed)
-            && instance.clients.is_empty()
-            && inactive_secs >= idle_timeout_secs
-        {
-            to_remove.push((entry.key().clone(), instance.clone(), inactive_secs));
+        if instance.clients.is_empty() {
+            if !instance.is_healthy().await {
+                to_remove.push((key, instance, inactive_secs, ReapReason::Dead));
+            } else if !instance.pinned.load(Ordering::Relaxed) && inactive_secs >= idle_timeout_secs
+            {
+                to_remove.push((key, instance, inactive_secs, ReapReason::Idle));
+            }
         }
     }
 
-    for (key, instance, inactive_secs) in to_remove {
-        if instances
-            .remove_if(&key, |_, current| {
+    for (key, instance, inactive_secs, reason) in to_remove {
+        // Re-check the map before removing: the instance may have been pinned
+        // or had a client attach between the snapshot and now.
+        let removed = match reason {
+            ReapReason::Dead => instances.remove_if(&key, |_, current| current.clients.is_empty()),
+            ReapReason::Idle => instances.remove_if(&key, |_, current| {
                 !current.pinned.load(Ordering::Relaxed) && current.clients.is_empty()
-            })
-            .is_some()
-        {
+            }),
+        };
+        if removed.is_some() {
             info!(
                 workspace = %key.workspace,
                 pid = instance.pid,
                 inactive_secs,
-                "reaping idle lsp instance"
+                ?reason,
+                "reaping lsp instance"
             );
             instance.shutdown().await;
         }
@@ -914,6 +935,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reap_idle_instances_removes_dead_pinned_zombie() {
+        let dead = spawn_test_instance();
+        let pinned = spawn_test_instance();
+        let idle = spawn_test_instance();
+        dead.pinned.store(true, Ordering::Relaxed);
+        pinned.pinned.store(true, Ordering::Relaxed);
+
+        // Simulate the backing process exiting on its own.
+        {
+            let mut child = dead.process.lock().await;
+            child.kill().await.unwrap();
+            child.wait().await.unwrap();
+        }
+
+        let instances = Arc::new(DashMap::new());
+        instances.insert(InstanceKey::new("file:///dead"), dead.clone());
+        instances.insert(InstanceKey::new("file:///pinned"), pinned.clone());
+        instances.insert(InstanceKey::new("file:///idle"), idle.clone());
+
+        reap_idle_instances(&instances, 0).await;
+
+        assert!(!instances.contains_key(&InstanceKey::new("file:///dead")));
+        assert!(instances.contains_key(&InstanceKey::new("file:///pinned")));
+        assert!(!instances.contains_key(&InstanceKey::new("file:///idle")));
+
+        pinned.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn clear_idle_skips_pinned() {
         let manager = empty_manager().await;
 
@@ -931,7 +981,11 @@ mod tests {
 
         assert_eq!(1, cleared.len());
         assert_eq!("file:///idle", cleared[0].workspace);
-        assert!(manager.instances.contains_key(&InstanceKey::new("file:///pinned")));
+        assert!(
+            manager
+                .instances
+                .contains_key(&InstanceKey::new("file:///pinned"))
+        );
 
         pinned.shutdown().await;
     }
